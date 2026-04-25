@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "30 Minute DOM History",
-  "description": "Tracks visited pages and stores a rolling 30-minute local history with page DOM snapshots.",
+  "name": "Synapse",
+  "description": "Captures your browsing context and synthesizes it into structured, comparable data.",
   "version": "1.0.0",
   "permissions": [
     "alarms",
@@ -27,7 +27,7 @@
     }
   ],
   "action": {
-    "default_title": "DOM History",
+    "default_title": "Synapse",
     "default_popup": "popup.html"
   }
 }

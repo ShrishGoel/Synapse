@@ -26,7 +26,10 @@ async function addHistoryEntry(entry) {
     url: entry.url,
     title: entry.title || "",
     dom: entry.dom || "",
-    domLength: typeof entry.dom === "string" ? entry.dom.length : 0
+    domLength: typeof entry.dom === "string" ? entry.dom.length : 0,
+    readable: entry.readable || null,
+    readableLength:
+      typeof entry.readable?.textContent === "string" ? entry.readable.textContent.length : 0
   };
 
   if (existingIndex >= 0) {
@@ -44,7 +47,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       tabId: sender.tab?.id,
       url: message.url || sender.tab?.url || "",
       title: message.title || sender.tab?.title || "",
-      dom: message.dom || ""
+      dom: message.dom || "",
+      readable: message.readable || null
     })
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
