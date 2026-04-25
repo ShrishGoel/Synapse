@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+from html import unescape
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -13,6 +15,8 @@ from urllib.request import Request, urlopen
 OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_ENV_PATH = Path(__file__).with_name(".env")
 DEFAULT_TIMEOUT_SECONDS = 60
+DEFAULT_MAX_HTML_CHARS = int(os.getenv("SUMMARIZER_MAX_HTML_CHARS", "120000"))
+DEFAULT_MAX_SEMANTIC_TEXT_CHARS = int(os.getenv("SUMMARIZER_MAX_SEMANTIC_TEXT_CHARS", "50000"))
 SUMMARY_JSON_SCHEMA = {
     "page_type": "string",
     "title": "string",
@@ -37,6 +41,52 @@ SUMMARY_JSON_SCHEMA = {
 
 class SummarizerError(RuntimeError):
     """Raised when HTML summarization cannot be completed."""
+
+
+COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+STRIP_BLOCK_RE = re.compile(
+    r"<(script|style|noscript|svg|iframe|canvas|template)[^>]*>.*?</\1>",
+    re.IGNORECASE | re.DOTALL,
+)
+TAG_RE = re.compile(r"<[^>]+>")
+WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _normalize_text(value: str) -> str:
+    without_tags = TAG_RE.sub(" ", value)
+    plain = unescape(without_tags)
+    return WHITESPACE_RE.sub(" ", plain).strip()
+
+
+def _extract_semantic_text(html: str, max_chars: int) -> str:
+    snippets: list[str] = []
+    patterns = [
+        r"<title[^>]*>(.*?)</title>",
+        r"<meta[^>]+name=[\"']description[\"'][^>]+content=[\"'](.*?)[\"'][^>]*>",
+        r"<h[1-3][^>]*>(.*?)</h[1-3]>",
+        r"<p[^>]*>(.*?)</p>",
+        r"<li[^>]*>(.*?)</li>",
+    ]
+    for pattern in patterns:
+        matches = re.findall(pattern, html, flags=re.IGNORECASE | re.DOTALL)
+        for match in matches:
+            text = _normalize_text(str(match))
+            if text:
+                snippets.append(text)
+
+    joined = "\n".join(snippets)
+    if len(joined) > max_chars:
+        return joined[:max_chars]
+    return joined
+
+
+def _prepare_html_for_llm(html: str) -> tuple[str, str]:
+    cleaned = COMMENT_RE.sub(" ", html)
+    cleaned = STRIP_BLOCK_RE.sub(" ", cleaned)
+    cleaned = WHITESPACE_RE.sub(" ", cleaned).strip()
+    compact_html = cleaned[:DEFAULT_MAX_HTML_CHARS]
+    semantic_text = _extract_semantic_text(cleaned, DEFAULT_MAX_SEMANTIC_TEXT_CHARS)
+    return compact_html, semantic_text
 
 
 def load_env(env_path: str | Path = DEFAULT_ENV_PATH) -> None:
@@ -90,6 +140,8 @@ def summarize_html(
     if not model:
         raise SummarizerError("Missing OPENROUTER_MODEL in environment or .env")
 
+    compact_html, semantic_text = _prepare_html_for_llm(html)
+
     payload = {
         "model": model,
         "messages": [
@@ -117,8 +169,10 @@ def summarize_html(
                     "- Keep key_points to 3-7 short strings.\n"
                     "- Keep entities and facts grounded in visible or semantic HTML "
                     "text.\n\n"
-                    "HTML:\n"
-                    f"{html}"
+                    "Semantic text excerpt:\n"
+                    f"{semantic_text}\n\n"
+                    "HTML (cleaned and truncated for token safety):\n"
+                    f"{compact_html}"
                 ),
             },
         ],

@@ -9,12 +9,15 @@ const statusToast = document.querySelector("#statusToast");
 const toastMessage = document.querySelector("#toastMessage");
 
 const FRONTEND_URL = "http://localhost:5173";
+const BACKEND_BASE_URL = "http://127.0.0.1:8010";
+const DEFAULT_PROMPT = "Compare the laptop coolers";
+const PROMPT_STORAGE_KEY = "synapseUserPrompt";
 
 function formatTime(timestamp) {
   return new Intl.DateTimeFormat(undefined, {
     hour: "numeric",
     minute: "2-digit",
-    second: "2-digit"
+    second: "2-digit",
   }).format(new Date(timestamp));
 }
 
@@ -58,6 +61,16 @@ function sendMessage(message) {
       resolve(response);
     });
   });
+}
+
+async function loadStoredPrompt() {
+  const data = await chrome.storage.local.get({ [PROMPT_STORAGE_KEY]: DEFAULT_PROMPT });
+  const savedPrompt = data?.[PROMPT_STORAGE_KEY];
+  return typeof savedPrompt === "string" && savedPrompt.trim() ? savedPrompt.trim() : DEFAULT_PROMPT;
+}
+
+async function saveStoredPrompt(prompt) {
+  await chrome.storage.local.set({ [PROMPT_STORAGE_KEY]: prompt });
 }
 
 function showToast(message, durationMs = 2500) {
@@ -132,71 +145,74 @@ function render(history) {
   }
 }
 
-async function sendToFrontend(prompt, history) {
-  const payload = {
-    type: "SYNAPSE_INGEST",
-    prompt,
-    timestamp: Date.now(),
-    pages: history.map((entry) => ({
-      id: entry.id,
-      url: entry.url,
-      title: getDisplayTitle(entry),
-      timestamp: entry.timestamp,
-      domLength: entry.domLength || entry.dom?.length || 0,
-      readableLength: entry.readableLength || 0,
-      extractor: entry.readable?.extractor || "none",
-      excerpt: entry.readable?.excerpt || "",
-      byline: entry.readable?.byline || "",
-      siteName: entry.readable?.siteName || "",
-      lang: entry.readable?.lang || "",
-      textContent: entry.readable?.textContent || "",
-      readableContent: entry.readable?.content || "",
-      dom: entry.dom || ""
-    }))
-  };
-
-  await chrome.storage.local.set({ synapse_pending_payload: payload });
-
+async function loadHistory() {
   try {
-    const [existingTab] = await chrome.tabs.query({ url: `${FRONTEND_URL}/*` });
-
-    if (existingTab) {
-      await chrome.tabs.update(existingTab.id, { active: true });
-      await chrome.tabs.sendMessage(existingTab.id, payload);
-    } else {
-      await chrome.tabs.create({ url: `${FRONTEND_URL}?synapse_ingest=1` });
-    }
+    const response = await sendMessage({ type: "GET_HISTORY" });
+    render(response.history || []);
   } catch (error) {
-    console.warn("Could not open frontend tab, payload saved to storage:", error);
+    summary.textContent = error.message;
   }
-
-  return payload;
 }
 
-promptForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const prompt = promptInput.value.trim();
+async function loadPrompt() {
+  promptInput.value = await loadStoredPrompt();
 
+  try {
+    const response = await fetch(`${BACKEND_BASE_URL}/api/v1/extension/preferences`);
+    if (!response.ok) {
+      throw new Error(`Failed to load prompt: ${response.status}`);
+    }
+
+    const payload = await response.json();
+    const resolvedPrompt = String(payload.user_prompt || "").trim() || promptInput.value || DEFAULT_PROMPT;
+    promptInput.value = resolvedPrompt;
+    await saveStoredPrompt(resolvedPrompt);
+  } catch (_) {
+    // Keep the popup usable even when the backend is offline.
+  }
+}
+
+async function openSynapse() {
+  const prompt = promptInput.value.trim();
   if (!prompt) {
+    showToast("Prompt cannot be empty");
     return;
   }
 
   try {
-    const response = await sendMessage({ type: "GET_HISTORY" });
-    const history = response.history || [];
+    await saveStoredPrompt(prompt);
+    summary.textContent = "Preparing graph...";
 
-    if (history.length === 0) {
-      showToast("No snapshots to send - browse some pages first");
-      return;
+    let syncPayload = { attempted: 0 };
+    try {
+      syncPayload = await sendMessage({ type: "SYNC_HISTORY_TO_BACKEND" });
+    } catch (_) {
+      // Best effort only. The frontend can still open.
     }
 
-    const payload = await sendToFrontend(prompt, history);
-    showToast(`Sent ${payload.pages.length} pages to Synapse`);
-    promptInput.value = "";
+    try {
+      await fetch(`${BACKEND_BASE_URL}/api/v1/extension/preferences`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_prompt: prompt }),
+      });
+    } catch (_) {
+      // Query string still carries the prompt to the frontend.
+    }
+
+    const attemptedSnapshots = Number(syncPayload.attempted ?? syncPayload.synced ?? 0);
+    summary.textContent = `Opening Synapse from ${attemptedSnapshots} captured snapshot${attemptedSnapshots === 1 ? "" : "s"}...`;
+    const targetUrl = `${FRONTEND_URL}/?prompt=${encodeURIComponent(prompt)}&run=${Date.now()}`;
+    await chrome.tabs.create({ url: targetUrl });
+    window.close();
   } catch (error) {
-    showToast(`Failed to send: ${error.message}`);
-    console.error(error);
+    summary.textContent = error.message || "Failed to graph.";
   }
+}
+
+promptForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await openSynapse();
 });
 
 document.querySelectorAll(".hint-chip").forEach((chip) => {
@@ -212,6 +228,7 @@ clearButton.addEventListener("click", async () => {
   try {
     await sendMessage({ type: "CLEAR_HISTORY" });
     render([]);
+    showToast("History cleared");
   } catch (error) {
     summary.textContent = error.message;
   } finally {
@@ -219,13 +236,5 @@ clearButton.addEventListener("click", async () => {
   }
 });
 
-async function loadHistory() {
-  try {
-    const response = await sendMessage({ type: "GET_HISTORY" });
-    render(response.history || []);
-  } catch (error) {
-    summary.textContent = error.message;
-  }
-}
-
+loadPrompt();
 loadHistory();

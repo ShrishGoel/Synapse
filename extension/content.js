@@ -29,11 +29,7 @@
     }
 
     const style = window.getComputedStyle(element);
-    if (
-      style.display === "none" ||
-      style.visibility === "hidden" ||
-      style.opacity === "0"
-    ) {
+    if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
       return false;
     }
 
@@ -55,7 +51,7 @@
       "dt",
       "button",
       "label",
-      "summary"
+      "summary",
     ].join(",");
     const blocks = [];
     const seen = new Set();
@@ -97,8 +93,7 @@
       metadata.push(`Description: ${description}`);
     }
 
-    const labels = root.querySelectorAll("h1, h2, h3");
-    labels.forEach((element) => {
+    root.querySelectorAll("h1, h2, h3").forEach((element) => {
       const text = normalizeWhitespace(element.textContent);
       if (text && !metadata.includes(text)) {
         metadata.push(text);
@@ -108,7 +103,16 @@
     return metadata.slice(0, 10);
   }
 
-  function buildGenericReadable() {
+  function escapeHtml(value) {
+    return value
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+
+  function captureReadable() {
     const root = pickRootElement();
     if (!root) {
       return null;
@@ -129,29 +133,12 @@
       byline: "",
       excerpt: combinedBlocks.slice(0, 3).join(" "),
       siteName:
-        normalizeWhitespace(
-          document.querySelector("meta[property='og:site_name']")?.content
-        ) || location.hostname,
+        normalizeWhitespace(document.querySelector("meta[property='og:site_name']")?.content) || location.hostname,
       lang: document.documentElement?.lang || "",
       length: textContent.length,
-      content: combinedBlocks
-        .map((block) => `<p>${escapeHtml(block)}</p>`)
-        .join(""),
-      textContent
+      content: combinedBlocks.map((block) => `<p>${escapeHtml(block)}</p>`).join(""),
+      textContent,
     };
-  }
-
-  function escapeHtml(value) {
-    return value
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;")
-      .replaceAll("'", "&#39;");
-  }
-
-  function captureReadable() {
-    return buildGenericReadable();
   }
 
   function sendSnapshot(reason) {
@@ -164,14 +151,13 @@
     }
 
     lastSnapshotKey = key;
-
     chrome.runtime.sendMessage({
       type: "DOM_SNAPSHOT",
       reason,
       url: location.href,
       title: document.title,
       dom,
-      readable
+      readable,
     });
   }
 
@@ -187,7 +173,7 @@
     childList: true,
     subtree: true,
     attributes: true,
-    characterData: true
+    characterData: true,
   });
 
   let previousUrl = location.href;
