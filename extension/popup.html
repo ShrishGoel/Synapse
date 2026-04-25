@@ -19,9 +19,15 @@
           </div>
           <p id="summary">Initializing...</p>
         </div>
-        <button id="clearButton" type="button" title="Clear all history">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18m-2 0v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6m3 0V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg>
-        </button>
+        <div class="header-actions">
+          <button id="themeButton" class="icon-button" type="button" title="Switch theme" aria-label="Switch theme">
+            <svg class="theme-sun" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path></svg>
+            <svg class="theme-moon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6.4 6.4 0 0 0 8.9 8.9A9 9 0 1 1 12 3z"></path></svg>
+          </button>
+          <button id="clearButton" class="icon-button" type="button" title="Clear all history" aria-label="Clear all history">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18m-2 0v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6m3 0V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg>
+          </button>
+        </div>
       </header>
 
       <!-- Prompt Bar -->
@@ -70,17 +76,17 @@
             </div>
             <div class="entry-info">
               <span class="entryTitle"></span>
-              <span class="entryUrl"></span>
             </div>
             <div class="entry-chevron">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
             </div>
           </div>
-          <div class="entry-footer">
-            <span class="entryMeta"></span>
-          </div>
         </button>
         <div class="dom-preview-container">
+          <div class="entry-expanded-meta">
+            <div class="entryExpandedUrl"></div>
+            <div class="entryExpandedMeta"></div>
+          </div>
           <div class="preview-actions">
             <button class="copy-button" type="button" title="Copy extracted text">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>

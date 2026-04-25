@@ -52,6 +52,11 @@
       "button",
       "label",
       "summary",
+      "[class*='review' i]",
+      "[id*='review' i]",
+      "[data-hook*='review' i]",
+      "[aria-label*='star' i]",
+      "[aria-label*='rating' i]",
     ].join(",");
     const blocks = [];
     const seen = new Set();
@@ -100,7 +105,19 @@
       }
     });
 
-    return metadata.slice(0, 10);
+    document
+      .querySelectorAll("[class*='review' i], [id*='review' i], [data-hook*='review' i], [aria-label*='rating' i]")
+      .forEach((element) => {
+        if (!isVisible(element)) {
+          return;
+        }
+        const text = normalizeWhitespace(element.textContent || element.getAttribute("aria-label") || "");
+        if (text && text.length >= 8 && !metadata.includes(text)) {
+          metadata.push(`Review signal: ${text}`);
+        }
+      });
+
+    return metadata.slice(0, 18);
   }
 
   function escapeHtml(value) {

@@ -374,6 +374,26 @@ def _should_investigate_further(user_prompt: str) -> bool:
     return any(token in prompt for token in investigation_tokens)
 
 
+def _wants_external_reviews(user_prompt: str) -> bool:
+    prompt = user_prompt.lower()
+    review_tokens = (
+        "review",
+        "reviews",
+        "external",
+        "reddit",
+        "forum",
+        "forums",
+        "complaint",
+        "complaints",
+        "user feedback",
+        "real world",
+        "real-world",
+        "owner",
+        "owners",
+    )
+    return any(token in prompt for token in review_tokens)
+
+
 def _supports_response_format_for_schema(schema_name: str) -> bool:
     model_name = OPENROUTER_MODEL.lower()
     if schema_name != "synthesized_graph_data":
@@ -775,6 +795,8 @@ async def _build_rubric(payload: SynthesizeRequest, base_context: str) -> Compar
         return ComparisonRubric(
             fields=[
                 "Price USD",
+                "External Review Consensus",
+                "Common Complaints",
                 "Noise Level (dB)",
                 "Cooling Performance",
                 "Fan Speed (RPM)",
@@ -788,6 +810,7 @@ async def _build_rubric(payload: SynthesizeRequest, base_context: str) -> Compar
             default_ordering="Best cooling performance among constraint matches, then price",
             seed_patterns=[
                 "Prioritize concrete performance specs over generic copy",
+                "Separate seller claims from external owner or reviewer sentiment",
                 "Preserve the currently captured product set as the main comparison board",
                 "Highlight budget, noise, and cooling tradeoffs explicitly",
             ],
@@ -826,7 +849,8 @@ async def _evaluate_context(
             "web search queries. Do not request searches for information already present. "
             "Minimize Firecrawl credit usage. Search only when likely to add materially new qualifying "
             "items or recent discussion signals. Search for candidate listings that expose price, "
-            "distance or neighborhood fit, rental or product type, and source URLs."
+            "distance or neighborhood fit, rental or product type, source URLs, and independent review "
+            "or complaint signals when the user asks about reviews."
         ),
         user_prompt=(
             f"User prompt:\n{user_prompt}\n\n"
@@ -916,7 +940,9 @@ async def _synthesize_graph(
             "keeping all seed items and filling the remaining capacity with the strongest discovered items only. "
             f"Keep each url under {MAX_SYNTHESIZED_URL_CHARS} characters and prefer canonical URLs without tracking, checkout, "
             "affiliate, or session parameters. sourceType is either seed or discovered. "
-            "Cite recent internet listing or discussion signals when possible."
+            "When external review context is present, include External Review Consensus and Common Complaints "
+            "as attributes, distinguish owner/reviewer sentiment from seller claims, and cite recent internet "
+            "listing or discussion signals when possible."
         ),
         user_prompt=(
             f"User prompt:\n{user_prompt}\n\n"
@@ -930,6 +956,8 @@ async def _synthesize_graph(
             "id, type, title, url, sourceType, aiRank, aiReason, summary, constraintViolated, constraintReason, and attributes. "
             "Put the domain facts in attributes instead of embedding them into aiReason or constraintReason. "
             "Each attribute should be a short label/value pair. Use exact rubric field names for labels whenever possible. "
+            "For review prompts, preserve review/forum evidence in attributes such as External Review Consensus, "
+            "Common Complaints, Reddit Consensus, Review Summary, or Owner Feedback. "
             "Keep all seed items, then choose only the most relevant discovered items if there are more candidates than the graph can hold."
         ),
     )        
@@ -1134,6 +1162,11 @@ def _build_backend_metrics(
         "Price USD",
         "Price",
         "Price Range",
+        "External Review Consensus",
+        "Common Complaints",
+        "Review Summary",
+        "Reddit Consensus",
+        "Owner Feedback",
         "Cooling Performance",
         "Cooling Performance Rating",
         "Fan Speed (RPM)",
@@ -1204,6 +1237,9 @@ def _build_backend_chips(raw_data: dict[str, Any], metrics: list[dict[str, str]]
         "Dust Filtration",
         "Dust Protection",
         "Noise Control Features",
+        "External Review Consensus",
+        "Common Complaints",
+        "Reddit Consensus",
     ]
     chips: list[str] = []
     for key in preferred_keys:
@@ -1496,10 +1532,36 @@ def _session_status_from_data(data: dict[str, Any]) -> str:
 def _session_group_for_node(node: ReactFlowNode) -> str:
     data = dict(node.data)
     source_type = _stringify_data_value(data.get("sourceType"), "seed")
+    source_label = _stringify_data_value(data.get("sourceLabel")).lower()
+    title = _stringify_data_value(data.get("title")).lower()
+    kind_label = _stringify_data_value(data.get("kindLabel")).lower()
+    if any(token in source_label for token in ["reddit", "forum"]) or any(token in title for token in ["consensus", "review", "feedback"]) or "review" in kind_label:
+        return "reviews"
     return "options" if source_type == "seed" else "context"
 
 
+def _session_type_for_node(node: ReactFlowNode) -> str:
+    data = dict(node.data)
+    source_label = _stringify_data_value(data.get("sourceLabel")).lower()
+    title = _stringify_data_value(data.get("title")).lower()
+    kind_label = _stringify_data_value(data.get("kindLabel"), node.type or "item").lower().replace(" ", "_")
+    if any(token in source_label for token in ["reddit", "forum"]) or any(token in title for token in ["consensus", "review", "feedback"]) or "review" in kind_label:
+        return "review"
+    return kind_label or "item"
+
+
 def _session_subtitle_for_node(data: dict[str, Any]) -> str:
+    source_label = _stringify_data_value(data.get("sourceLabel")).lower()
+    title = _stringify_data_value(data.get("title")).lower()
+    if any(token in source_label for token in ["reddit", "forum"]) or any(token in title for token in ["consensus", "review", "feedback"]):
+        review_sentiment = _stringify_data_value(data.get("reviewSentimentLabel"))
+        summary = _stringify_data_value(data.get("summary"))
+        if review_sentiment and review_sentiment != "Unknown":
+            return review_sentiment
+        if summary:
+            return _debug_truncate(summary, 96)
+        return _stringify_data_value(data.get("sourceLabel"), "External review")
+
     metric_bits: list[str] = []
     price_usd = _parse_data_number(data.get("priceUsd"))
     if price_usd > 0:
@@ -1591,7 +1653,7 @@ def _build_session_graph(graph: ReactFlowGraphData) -> SessionGraph:
         session_nodes.append(
             SessionGraphNode(
                 id=node.id,
-                type=_stringify_data_value(data.get("kindLabel"), node.type or "item").lower().replace(" ", "_"),
+                type=_session_type_for_node(node),
                 source=_stringify_data_value(data.get("sourceLabel"), "Captured"),
                 title=_stringify_data_value(data.get("title"), node.id),
                 subtitle=_session_subtitle_for_node(data),
@@ -1624,7 +1686,7 @@ def _rank_values(values: list[float], *, reverse: bool = False) -> dict[float, i
 
 
 def _build_session_matrix(query: str, domain: str, graph: ReactFlowGraphData) -> SessionMatrix:
-    option_nodes = [node for node in graph.nodes if _session_group_for_node(node) == "options"] or list(graph.nodes)
+    option_nodes = list(graph.nodes)
 
     if domain == "housing":
         columns = [
@@ -1904,6 +1966,36 @@ def _sanitize_search_queries(queries: list[str], budget: int) -> list[str]:
     return cleaned
 
 
+def _title_from_active_tab_summary(tab: ActiveTab) -> str:
+    summary = tab.summary
+    match = re.search(r"Title:\s*([^|]+)", summary)
+    if match:
+        return match.group(1).strip()
+    return str(tab.url).rsplit("/", 1)[-1].replace("-", " ").strip() or str(tab.url)
+
+
+def _review_search_queries(active_tabs: list[ActiveTab], user_prompt: str, budget: int) -> list[str]:
+    if budget <= 0 or not _wants_external_reviews(user_prompt):
+        return []
+
+    prompt_keywords = " ".join(_prompt_keywords(user_prompt)[:5])
+    candidates: list[str] = []
+    for tab in active_tabs[:4]:
+        title = _title_from_active_tab_summary(tab)
+        title = re.sub(r"\s+", " ", title).strip()
+        title = re.sub(r"\b(Amazon\.com|Walmart\.com|Best Buy|eBay)\b", "", title, flags=re.IGNORECASE).strip(" -:|")
+        if len(title) > 90:
+            title = title[:90].rsplit(" ", 1)[0]
+        if title:
+            candidates.append(f"{title} reviews complaints reddit forum")
+
+    if prompt_keywords:
+        candidates.append(f"{prompt_keywords} best reviews complaints reddit forum")
+        candidates.append(f"{prompt_keywords} external reviews owner feedback")
+
+    return _sanitize_search_queries(candidates, budget)
+
+
 def _filter_graph_for_prompt(graph: ReactFlowGraphData, user_prompt: str) -> ReactFlowGraphData:
     prompt = user_prompt.lower()
     wants_active_cooler = any(token in prompt for token in ["cooler", "cooling pad", "cooling pads", "laptop cooler"])
@@ -2029,6 +2121,25 @@ async def synthesize(payload: SynthesizeRequest) -> ReactFlowGraphData:
         rubric = await _build_rubric(payload, context)
         logger.debug("Generated rubric fields=%s", rubric.fields)
         logger.debug("Inferred constraints=%s seed_patterns=%s", rubric.inferred_constraints, rubric.seed_patterns)
+
+        review_queries = _review_search_queries(payload.active_tabs, payload.user_prompt, query_budget_remaining)
+        if review_queries:
+            logger.debug("Running review-focused discovery queries=%s", review_queries)
+            review_results = await asyncio.gather(
+                *[_run_firecrawl_search(query) for query in review_queries],
+                return_exceptions=False,
+            )
+            query_budget_remaining -= len(review_queries)
+            context += (
+                "\n\n--- External Review Signals ---\n"
+                "These results are for independent reviews, owner feedback, forum threads, complaints, "
+                "and consensus signals. Prefer them for review sentiment and tradeoffs; keep seller pages "
+                "as seed/product fact sources.\n"
+                f"Queries used: {len(review_queries)}\n"
+                f"Remaining query budget: {query_budget_remaining}\n\n"
+                + "\n\n".join(review_results)
+            )
+            allow_discovery = allow_discovery and query_budget_remaining > 0
 
         evaluation_passes = 0
         while allow_discovery and evaluation_passes < MAX_EVALUATION_PASSES:

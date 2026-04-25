@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 222 47% 5%;
+  --foreground: 210 40% 98%;
+  --border: 214 32% 18%;
+  --muted: 217 33% 17%;
+  --muted-foreground: 215 20% 65%;
+  --accent: 188 94% 43%;
+  --accent-foreground: 222 47% 5%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #1c1b16;
+  color: #f1ece0;
+  overflow-x: hidden;
+  font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+.react-flow__node {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  transition: transform 520ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease;
+}
+
+.react-flow__edge-path {
+  stroke: rgba(220, 207, 182, 0.18);
+  stroke-width: 2px;
+}
+
+.react-flow__pane {
+  cursor: default;
+}
+
+.react-flow__node.dragging,
+.react-flow__node:active {
+  transition: none;
+}
+
+.react-flow__attribution {
+  display: none;
+}

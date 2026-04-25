@@ -3,10 +3,13 @@ import { AnimatePresence, motion } from "framer-motion";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8010";
 const DEFAULT_QUERY = "Compare the laptop coolers";
-const BOARD_WIDTH = 1120;
-const BOARD_HEIGHT = 620;
+const BOARD_WIDTH = 1160;
+const BOARD_MIN_HEIGHT = 620;
 const NODE_WIDTH = 248;
-const NODE_HEIGHT = 156;
+const NODE_HEIGHT = 206;
+const NODE_GAP = 34;
+const BOARD_PADDING = 34;
+const BOARD_MAX_COLUMNS = 4;
 const VIEWS = ["board", "digest", "compare"];
 const SORT_OPTIONS = [
   { value: "ai", label: "AI best choice" },
@@ -100,6 +103,30 @@ function isViolated(node) {
   return Boolean(node?.metadata?.constraintViolated);
 }
 
+function isDiscoveredNode(node) {
+  return node?.metadata?.sourceType === "discovered";
+}
+
+function isExternalReviewNode(node) {
+  const source = String(node?.source || "").toLowerCase();
+  const title = String(node?.title || "").toLowerCase();
+  const type = normalizeType(node?.type);
+  const group = String(node?.group || "").toLowerCase();
+  const sourceType = String(node?.metadata?.sourceType || "").toLowerCase();
+  return (
+    type === "review" ||
+    group === "reviews" ||
+    source.includes("reddit") ||
+    source.includes("forum") ||
+    source.includes("youtube") ||
+    (sourceType === "discovered" &&
+      (title.includes("consensus") ||
+        title.includes("owner feedback") ||
+        title.includes("review") ||
+        title.includes("complaint")))
+  );
+}
+
 function getNodeSortValue(node, sortMode) {
   if (sortMode === "price") {
     return metaNumber(node, "priceUsd") ?? Number.POSITIVE_INFINITY;
@@ -110,72 +137,140 @@ function getNodeSortValue(node, sortMode) {
   return metaNumber(node, "aiRank") ?? Number.POSITIVE_INFINITY;
 }
 
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
-
 function axisMetaForDomain(domain) {
   if (domain === "housing") {
     return {
-      x: { key: "priceUsd", label: "Lower price to higher price" },
-      y: { key: "squareFeet", label: "Smaller space to larger space", invert: true },
+      x: { label: "Rank confidence", low: "Lower", high: "Higher" },
+      y: { label: "Fit", low: "Worse", high: "Better" },
     };
   }
   return {
-    x: { key: "priceUsd", label: "Lower price to higher price" },
-    y: { key: "noiseLevelDb", label: "Quieter to louder" },
+    x: { label: "Rank confidence", low: "Lower", high: "Higher" },
+    y: { label: "Fit", low: "Worse", high: "Better" },
   };
 }
 
-function computeLayout(nodes, domain) {
+function boardColumnsFor(nodesLength, viewportWidth) {
+  if (nodesLength <= 1) {
+    return 1;
+  }
+
+  const safeViewport = Math.max(360, viewportWidth || BOARD_WIDTH);
+  const availableWidth = Math.max(safeViewport - 96, NODE_WIDTH + BOARD_PADDING * 2);
+  const columnsThatFit = Math.max(
+    1,
+    Math.floor((availableWidth - BOARD_PADDING * 2 + NODE_GAP) / (NODE_WIDTH + NODE_GAP)),
+  );
+
+  return Math.min(nodesLength, BOARD_MAX_COLUMNS, columnsThatFit);
+}
+
+function boardWidthFor(columns, viewportWidth) {
+  const naturalWidth = BOARD_PADDING * 2 + columns * NODE_WIDTH + Math.max(0, columns - 1) * NODE_GAP;
+  if (columns === 1) {
+    return Math.min(Math.max(320, viewportWidth - 32), naturalWidth);
+  }
+  return naturalWidth;
+}
+
+function boardHeightFor(nodesLength, columns) {
+  const rows = Math.max(1, Math.ceil(nodesLength / columns));
+  return Math.max(BOARD_MIN_HEIGHT, BOARD_PADDING * 2 + rows * NODE_HEIGHT + Math.max(0, rows - 1) * NODE_GAP);
+}
+
+function computeLayout(nodes, domain, viewportWidth, boardWidth, boardHeight) {
   const positions = {};
   if (!nodes.length) {
     return positions;
   }
 
-  const centerX = BOARD_WIDTH / 2 - NODE_WIDTH / 2;
-  const centerY = BOARD_HEIGHT / 2 - NODE_HEIGHT / 2;
-  const axisMeta = axisMetaForDomain(domain);
-  const valuesFor = (key) => nodes.map((node) => metaNumber(node, key)).filter((value) => value !== null);
-  const xValues = valuesFor(axisMeta.x.key);
-  const yValues = valuesFor(axisMeta.y.key);
-  const xMin = xValues.length ? Math.min(...xValues) : null;
-  const xMax = xValues.length ? Math.max(...xValues) : null;
-  const yMin = yValues.length ? Math.min(...yValues) : null;
-  const yMax = yValues.length ? Math.max(...yValues) : null;
-  const maxSpreadX = BOARD_WIDTH / 2 - NODE_WIDTH / 2 - 48;
-  const maxSpreadY = BOARD_HEIGHT / 2 - NODE_HEIGHT / 2 - 48;
+  const rankedNodes = [...nodes];
+  const priceValues = rankedNodes.map((node) => metaNumber(node, "priceUsd")).filter((value) => value !== null);
+  const scoreValues = rankedNodes.map((node) => metaNumber(node, "combinedScore")).filter((value) => value !== null);
+  const aiRanks = rankedNodes.map((node) => metaNumber(node, "aiRank")).filter((value) => value !== null);
+  const priceMin = priceValues.length ? Math.min(...priceValues) : 0;
+  const priceMax = priceValues.length ? Math.max(...priceValues) : 0;
+  const scoreMin = scoreValues.length ? Math.min(...scoreValues) : 0;
+  const scoreMax = scoreValues.length ? Math.max(...scoreValues) : 0;
+  const rankMin = aiRanks.length ? Math.min(...aiRanks) : 1;
+  const rankMax = aiRanks.length ? Math.max(...aiRanks) : 1;
+  const xRange = Math.max(0, boardWidth - NODE_WIDTH - BOARD_PADDING * 2);
+  const yRange = Math.max(0, boardHeight - NODE_HEIGHT - BOARD_PADDING * 2);
+  const targetPositions = {};
 
-  nodes.forEach((node, index) => {
-    const rank = metaNumber(node, "aiRank") ?? index + 1;
-    const radiusFactor = clamp(0.18 + ((rank - 1) / Math.max(nodes.length, 1)) * 0.9, 0.18, 1);
-    const xValue = metaNumber(node, axisMeta.x.key);
-    const yValue = metaNumber(node, axisMeta.y.key);
-    let xDeviation = 0;
-    let yDeviation = 0;
-
-    if (xValue !== null && xMin !== null && xMax !== null && xMax > xMin) {
-      xDeviation = ((xValue - xMin) / (xMax - xMin)) * 2 - 1;
-    } else {
-      xDeviation = (index % 2 === 0 ? -1 : 1) * 0.14;
-    }
-
-    if (yValue !== null && yMin !== null && yMax !== null && yMax > yMin) {
-      yDeviation = ((yValue - yMin) / (yMax - yMin)) * 2 - 1;
-      if (axisMeta.y.invert) {
-        yDeviation *= -1;
-      }
-    } else {
-      yDeviation = Math.floor(index / 2) % 2 === 0 ? -0.14 : 0.14;
-    }
-
-    const jitterX = ((index % 3) - 1) * 18;
-    const jitterY = ((index % 4) - 1.5) * 16;
-    positions[node.id] = {
-      x: clamp(centerX + xDeviation * maxSpreadX * radiusFactor + jitterX, 24, BOARD_WIDTH - NODE_WIDTH - 24),
-      y: clamp(centerY + yDeviation * maxSpreadY * radiusFactor + jitterY, 24, BOARD_HEIGHT - NODE_HEIGHT - 24),
+  rankedNodes.forEach((node) => {
+    const rank = metaNumber(node, "aiRank") ?? rankMax;
+    const combinedScore = metaNumber(node, "combinedScore") ?? scoreMin;
+    const price = metaNumber(node, "priceUsd");
+    const rankNormalized = rankMax > rankMin ? 1 - (rank - rankMin) / (rankMax - rankMin) : 1;
+    const fitNormalized = scoreMax > scoreMin ? (combinedScore - scoreMin) / (scoreMax - scoreMin) : 0.65;
+    const pricePenalty = price !== null && priceMax > priceMin ? (price - priceMin) / (priceMax - priceMin) : 0.2;
+    const xNormalized = Math.max(0, Math.min(1, rankNormalized * 0.8 + (1 - pricePenalty) * 0.2));
+    const yNormalizedBase = Math.max(0, Math.min(1, fitNormalized));
+    const yNormalized = isViolated(node) ? Math.min(0.18, yNormalizedBase * 0.35) : Math.max(0.12, yNormalizedBase);
+    targetPositions[node.id] = {
+      x: BOARD_PADDING + xNormalized * xRange,
+      y: BOARD_PADDING + (1 - yNormalized) * yRange,
     };
+    positions[node.id] = { ...targetPositions[node.id] };
   });
+
+  const orderedIds = rankedNodes
+    .sort((left, right) => {
+      const leftScore = metaNumber(left, "combinedScore") ?? scoreMin;
+      const rightScore = metaNumber(right, "combinedScore") ?? scoreMin;
+      if (leftScore !== rightScore) {
+        return rightScore - leftScore;
+      }
+      return (metaNumber(left, "aiRank") ?? 999) - (metaNumber(right, "aiRank") ?? 999);
+    })
+    .map((node) => node.id);
+
+  const minDx = NODE_WIDTH + 16;
+  const minDy = NODE_HEIGHT + 16;
+
+  for (let iteration = 0; iteration < 80; iteration += 1) {
+    for (let index = 0; index < orderedIds.length; index += 1) {
+      const leftId = orderedIds[index];
+      const leftPosition = positions[leftId];
+      if (!leftPosition) {
+        continue;
+      }
+
+      for (let nextIndex = index + 1; nextIndex < orderedIds.length; nextIndex += 1) {
+        const rightId = orderedIds[nextIndex];
+        const rightPosition = positions[rightId];
+        if (!rightPosition) {
+          continue;
+        }
+
+        const dx = rightPosition.x - leftPosition.x;
+        const dy = rightPosition.y - leftPosition.y;
+        const overlapX = minDx - Math.abs(dx);
+        const overlapY = minDy - Math.abs(dy);
+
+        if (overlapX > 0 && overlapY > 0) {
+          const pushX = overlapX * 0.16 * (dx >= 0 ? 1 : -1);
+          const pushY = overlapY * 0.16 * (dy >= 0 ? 1 : -1);
+          leftPosition.x = Math.max(BOARD_PADDING, Math.min(BOARD_PADDING + xRange, leftPosition.x - pushX));
+          rightPosition.x = Math.max(BOARD_PADDING, Math.min(BOARD_PADDING + xRange, rightPosition.x + pushX));
+          leftPosition.y = Math.max(BOARD_PADDING, Math.min(BOARD_PADDING + yRange, leftPosition.y - pushY));
+          rightPosition.y = Math.max(BOARD_PADDING, Math.min(BOARD_PADDING + yRange, rightPosition.y + pushY));
+        }
+      }
+    }
+
+    orderedIds.forEach((id) => {
+      positions[id].x = Math.max(
+        BOARD_PADDING,
+        Math.min(BOARD_PADDING + xRange, positions[id].x * 0.9 + targetPositions[id].x * 0.1),
+      );
+      positions[id].y = Math.max(
+        BOARD_PADDING,
+        Math.min(BOARD_PADDING + yRange, positions[id].y * 0.9 + targetPositions[id].y * 0.1),
+      );
+    });
+  }
 
   return positions;
 }
@@ -378,6 +473,7 @@ export default function App() {
   const [digestOrder, setDigestOrder] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
+  const [viewportWidth, setViewportWidth] = useState(() => (typeof window === "undefined" ? 1280 : window.innerWidth));
 
   const data = session;
   const show = (value) => view === "all" || view === value;
@@ -389,24 +485,53 @@ export default function App() {
   const selectedNode = selected ? nodeMap[selected] : null;
   const boardAxes = useMemo(() => axisMetaForDomain(data?.domain), [data]);
 
+  const allNodes = useMemo(() => data?.graph?.nodes || [], [data]);
   const visibleNodes = useMemo(() => {
-    const nodes = data?.graph?.nodes || [];
     if (showDiscovered) {
-      return nodes;
+      return allNodes;
     }
-    return nodes.filter((node) => node?.metadata?.sourceType !== "discovered");
-  }, [data, showDiscovered]);
+    return allNodes.filter((node) => !isDiscoveredNode(node));
+  }, [allNodes, showDiscovered]);
+  const boardNodes = useMemo(
+    () =>
+      visibleNodes
+        .filter((node) => !isExternalReviewNode(node))
+        .sort((left, right) => {
+          if (isViolated(left) !== isViolated(right)) {
+            return Number(isViolated(left)) - Number(isViolated(right));
+          }
+          return (metaNumber(left, "aiRank") ?? 999) - (metaNumber(right, "aiRank") ?? 999);
+        }),
+    [visibleNodes],
+  );
+  const reviewNodes = useMemo(
+    () =>
+      visibleNodes
+        .filter((node) => isExternalReviewNode(node))
+        .sort((left, right) => (metaNumber(left, "aiRank") ?? 999) - (metaNumber(right, "aiRank") ?? 999)),
+    [visibleNodes],
+  );
 
+  const boardNodeIds = useMemo(() => new Set(boardNodes.map((node) => node.id)), [boardNodes]);
   const visibleNodeIds = useMemo(() => new Set(visibleNodes.map((node) => node.id)), [visibleNodes]);
+  const boardColumns = useMemo(() => boardColumnsFor(boardNodes.length, viewportWidth), [boardNodes.length, viewportWidth]);
+  const boardWidth = useMemo(() => boardWidthFor(boardColumns, viewportWidth), [boardColumns, viewportWidth]);
+  const boardHeight = useMemo(() => boardHeightFor(boardNodes.length, boardColumns), [boardColumns, boardNodes.length]);
 
   const visibleEdges = useMemo(
-    () => (data?.graph?.edges || []).filter((edge) => visibleNodeIds.has(edge.from) && visibleNodeIds.has(edge.to)),
-    [data, visibleNodeIds],
+    () => (data?.graph?.edges || []).filter((edge) => boardNodeIds.has(edge.from) && boardNodeIds.has(edge.to)),
+    [boardNodeIds, data],
   );
 
   useEffect(() => {
-    setPositions(computeLayout(visibleNodes, data?.domain));
-  }, [visibleNodes, data]);
+    setPositions(computeLayout(boardNodes, data?.domain, viewportWidth, boardWidth, boardHeight));
+  }, [boardNodes, data, viewportWidth, boardWidth, boardHeight]);
+
+  useEffect(() => {
+    const handleResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
 
   async function runQuery(nextQuery, nextConstraint) {
     const resolvedQuery = nextQuery.trim() || DEFAULT_QUERY;
@@ -469,8 +594,8 @@ export default function App() {
   }, [sortMode, showDiscovered]);
 
   const visibleMatrixRows = useMemo(
-    () => (data?.matrix?.rows || []).filter((row) => visibleNodeIds.has(row.node_id)),
-    [data, visibleNodeIds],
+    () => (data?.matrix?.rows || []).filter((row) => boardNodeIds.has(row.node_id)),
+    [boardNodeIds, data],
   );
 
   useEffect(() => {
@@ -626,14 +751,6 @@ export default function App() {
                 {signal}
               </span>
             ))}
-            <label style={{ ...pill, display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
-              <input
-                type="checkbox"
-                checked={showDiscovered}
-                onChange={(event) => setShowDiscovered(event.target.checked)}
-              />
-              Show AI discovered
-            </label>
             <div style={{ marginLeft: "auto", display: "flex", background: "rgba(255,255,255,0.04)", borderRadius: 10, padding: 3, border: "1px solid rgba(255,255,255,0.06)" }}>
               {VIEWS.map((value) => (
                 <button
@@ -672,6 +789,23 @@ export default function App() {
               >
                 All
               </button>
+              <button
+                onClick={() => setShowDiscovered((current) => !current)}
+                title={showDiscovered ? "Showing captured and AI-discovered nodes" : "Showing captured nodes only"}
+                style={{
+                  padding: "6px 16px",
+                  borderRadius: 8,
+                  border: "none",
+                  cursor: "pointer",
+                  fontSize: 12,
+                  fontWeight: 500,
+                  fontFamily: "inherit",
+                  background: showDiscovered ? "rgba(34,197,94,0.16)" : "transparent",
+                  color: showDiscovered ? "#86efac" : "#6b7280",
+                }}
+              >
+                AI {showDiscovered ? "on" : "off"}
+              </button>
             </div>
           </div>
         ) : null}
@@ -684,18 +818,57 @@ export default function App() {
               <div style={{ ...label, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <span>Board</span>
                 <span style={{ color: "#8d93a0", textTransform: "none", letterSpacing: 0 }}>
-                  Best choices stay closest to center. Constraints are highlighted in red.
+                  Two axes are back: better fit rises upward, better rank moves right.
                 </span>
               </div>
               <div style={{ ...card, padding: 12, overflow: "auto", minHeight: 520 }}>
-                <div style={{ position: "relative", width: BOARD_WIDTH, height: BOARD_HEIGHT, margin: "0 auto" }}>
-                  <div style={{ position: "absolute", left: 24, right: 24, top: BOARD_HEIGHT / 2, height: 1, background: "rgba(255,255,255,0.08)" }} />
-                  <div style={{ position: "absolute", top: 24, bottom: 24, left: BOARD_WIDTH / 2, width: 1, background: "rgba(255,255,255,0.08)" }} />
-                  <div style={{ position: "absolute", left: BOARD_WIDTH / 2 - 34, top: BOARD_HEIGHT / 2 - 34, width: 68, height: 68, borderRadius: "50%", border: "1px dashed rgba(34,197,94,0.3)", background: "rgba(34,197,94,0.04)" }} />
-                  <div style={{ position: "absolute", left: 28, bottom: 20, fontSize: 11, color: "#7b8190" }}>
+                <div
+                  style={{
+                    position: "relative",
+                    width: boardWidth,
+                    height: boardHeight,
+                    margin: "0 auto",
+                    borderRadius: 18,
+                    overflow: "hidden",
+                    background:
+                      "linear-gradient(135deg, rgba(127,29,29,0.34) 0%, rgba(24,24,27,0.86) 40%, rgba(21,128,61,0.30) 100%)",
+                  }}
+                >
+                  <div
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      background:
+                        "linear-gradient(135deg, rgba(248,113,113,0.08) 0%, rgba(248,113,113,0) 38%, rgba(74,222,128,0.14) 100%)",
+                      pointerEvents: "none",
+                    }}
+                  />
+                  <div style={{ position: "absolute", left: BOARD_PADDING, right: BOARD_PADDING, bottom: BOARD_PADDING - 10, height: 1, background: "rgba(255,255,255,0.14)" }} />
+                  <div style={{ position: "absolute", left: BOARD_PADDING - 10, top: BOARD_PADDING, bottom: BOARD_PADDING, width: 1, background: "rgba(255,255,255,0.14)" }} />
+                  <div style={{ position: "absolute", left: BOARD_PADDING, right: BOARD_PADDING, top: boardHeight / 2, height: 1, background: "rgba(255,255,255,0.05)" }} />
+                  <div style={{ position: "absolute", top: BOARD_PADDING, bottom: BOARD_PADDING, left: boardWidth / 2, width: 1, background: "rgba(255,255,255,0.05)" }} />
+                  <div style={{ position: "absolute", right: 20, top: 18, padding: "6px 10px", borderRadius: 999, border: "1px solid rgba(134,239,172,0.34)", background: "rgba(22,101,52,0.24)", fontSize: 11, fontWeight: 700, color: "#dcfce7", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                    Best
+                  </div>
+                  <div style={{ position: "absolute", left: 20, bottom: 18, padding: "6px 10px", borderRadius: 999, border: "1px solid rgba(248,113,113,0.24)", background: "rgba(127,29,29,0.18)", fontSize: 11, fontWeight: 700, color: "#fecaca", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                    Worst
+                  </div>
+                  <div style={{ position: "absolute", left: BOARD_PADDING, bottom: 10, fontSize: 11, color: "#9ca3af", fontWeight: 600 }}>
+                    {boardAxes.x.low}
+                  </div>
+                  <div style={{ position: "absolute", right: BOARD_PADDING, bottom: 10, fontSize: 11, color: "#d1d5db", fontWeight: 700 }}>
+                    {boardAxes.x.high}
+                  </div>
+                  <div style={{ position: "absolute", left: 10, bottom: BOARD_PADDING, fontSize: 11, color: "#9ca3af", fontWeight: 600, writingMode: "vertical-rl", textOrientation: "mixed" }}>
+                    {boardAxes.y.low}
+                  </div>
+                  <div style={{ position: "absolute", left: 10, top: BOARD_PADDING, fontSize: 11, color: "#d1d5db", fontWeight: 700, writingMode: "vertical-rl", textOrientation: "mixed" }}>
+                    {boardAxes.y.high}
+                  </div>
+                  <div style={{ position: "absolute", left: boardWidth / 2 - 42, bottom: 14, fontSize: 11, color: "#cbd5e1", fontWeight: 600, letterSpacing: "0.02em" }}>
                     {boardAxes.x.label}
                   </div>
-                  <div style={{ position: "absolute", right: 28, top: 20, fontSize: 11, color: "#7b8190", writingMode: "vertical-rl", textOrientation: "mixed" }}>
+                  <div style={{ position: "absolute", left: 18, top: boardHeight / 2 - 10, fontSize: 11, color: "#cbd5e1", fontWeight: 600, letterSpacing: "0.02em", writingMode: "vertical-rl", textOrientation: "mixed" }}>
                     {boardAxes.y.label}
                   </div>
                   <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}>
@@ -719,7 +892,7 @@ export default function App() {
                       );
                     })}
                   </svg>
-                  {visibleNodes.map((node) => {
+                  {boardNodes.map((node) => {
                     const position = positions[node.id] || { x: 80, y: 80 };
                     return (
                       <div key={node.id} style={{ position: "absolute", left: position.x, top: position.y }}>
@@ -729,6 +902,41 @@ export default function App() {
                   })}
                 </div>
               </div>
+              {reviewNodes.length ? (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ ...label, marginBottom: 10 }}>External Reviews</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 10 }}>
+                    {reviewNodes.map((node) => (
+                      <motion.button
+                        key={node.id}
+                        type="button"
+                        onClick={() => setSelected((prev) => (prev === node.id ? null : node.id))}
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        style={{
+                          ...card,
+                          padding: 14,
+                          textAlign: "left",
+                          cursor: "pointer",
+                          borderColor: selected === node.id ? "#ef4444" : "rgba(239,68,68,0.16)",
+                          background: "rgba(56,20,20,0.26)",
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                          <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "#fca5a5", letterSpacing: "0.08em" }}>
+                            {node.source}
+                          </span>
+                          <span style={{ ...pill, padding: "2px 8px", fontSize: 10, color: "#fecaca", border: "1px solid rgba(248,113,113,0.18)", background: "rgba(127,29,29,0.18)" }}>
+                            external review
+                          </span>
+                        </div>
+                        <div style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.35 }}>{node.title}</div>
+                        <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.55, color: "#d8c7c7" }}>{node.summary}</div>
+                      </motion.button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
             </section>
           )}
 

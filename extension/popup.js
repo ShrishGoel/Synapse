@@ -7,11 +7,13 @@ const promptForm = document.querySelector("#promptForm");
 const promptInput = document.querySelector("#promptInput");
 const statusToast = document.querySelector("#statusToast");
 const toastMessage = document.querySelector("#toastMessage");
+const themeButton = document.querySelector("#themeButton");
 
 const FRONTEND_URL = "http://localhost:5173";
 const BACKEND_BASE_URL = "http://127.0.0.1:8010";
 const DEFAULT_PROMPT = "Compare the laptop coolers";
 const PROMPT_STORAGE_KEY = "synapseUserPrompt";
+const THEME_STORAGE_KEY = "synapsePopupTheme";
 
 function formatTime(timestamp) {
   return new Intl.DateTimeFormat(undefined, {
@@ -73,6 +75,31 @@ async function saveStoredPrompt(prompt) {
   await chrome.storage.local.set({ [PROMPT_STORAGE_KEY]: prompt });
 }
 
+function applyTheme(theme) {
+  const resolvedTheme = theme === "light" ? "light" : "dark";
+  document.documentElement.dataset.theme = resolvedTheme;
+  document.body.dataset.theme = resolvedTheme;
+  document.documentElement.classList.toggle("light-theme", resolvedTheme === "light");
+  document.body.classList.toggle("light-theme", resolvedTheme === "light");
+  document.documentElement.style.colorScheme = resolvedTheme;
+  document.body.style.colorScheme = resolvedTheme;
+  document.body.style.backgroundColor = resolvedTheme === "light" ? "#f7f7f4" : "#0a0a0a";
+  document.body.style.color = resolvedTheme === "light" ? "#172033" : "#e5e7eb";
+  themeButton?.setAttribute("aria-label", `Switch to ${resolvedTheme === "light" ? "dark" : "light"} theme`);
+  themeButton?.setAttribute("title", `Switch to ${resolvedTheme === "light" ? "dark" : "light"} theme`);
+}
+
+async function loadTheme() {
+  const data = await chrome.storage.local.get({ [THEME_STORAGE_KEY]: "dark" });
+  applyTheme(data[THEME_STORAGE_KEY]);
+}
+
+async function toggleTheme() {
+  const nextTheme = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+  applyTheme(nextTheme);
+  await chrome.storage.local.set({ [THEME_STORAGE_KEY]: nextTheme });
+}
+
 function showToast(message, durationMs = 2500) {
   toastMessage.textContent = message;
   statusToast.hidden = false;
@@ -97,25 +124,30 @@ function render(history) {
     const item = fragment.querySelector("li");
     const button = fragment.querySelector(".entryButton");
     const title = fragment.querySelector(".entryTitle");
-    const url = fragment.querySelector(".entryUrl");
-    const meta = fragment.querySelector(".entryMeta");
+    const expandedUrl = fragment.querySelector(".entryExpandedUrl");
+    const expandedMeta = fragment.querySelector(".entryExpandedMeta");
     const preview = fragment.querySelector(".domPreview");
     const copyButton = fragment.querySelector(".copy-button");
 
     title.textContent = getDisplayTitle(entry);
-    url.textContent = entry.url;
-    meta.textContent = `${formatTime(entry.timestamp)} - ${getExtractorLabel(entry)} - readable ${formatBytes(entry.readableLength || 0)} - dom ${formatBytes(entry.domLength || entry.dom?.length || 0)}`;
-    preview.value = getPreviewText(entry);
+    expandedUrl.textContent = entry.url;
+    expandedMeta.textContent = `${formatTime(entry.timestamp)} - ${getExtractorLabel(entry)} - readable ${formatBytes(entry.readableLength || 0)} - dom ${formatBytes(entry.domLength || entry.dom?.length || 0)}`;
+    preview.value = "";
 
     button.addEventListener("click", () => {
       const isOpen = item.dataset.open === "true";
       document.querySelectorAll('.history-card[data-open="true"]').forEach((openItem) => {
         if (openItem !== item) {
           openItem.dataset.open = "false";
+          const openPreview = openItem.querySelector(".domPreview");
+          if (openPreview) {
+            openPreview.value = "";
+          }
         }
       });
 
       item.dataset.open = isOpen ? "false" : "true";
+      preview.value = isOpen ? "" : getPreviewText(entry);
 
       if (!isOpen) {
         item.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -236,5 +268,12 @@ clearButton.addEventListener("click", async () => {
   }
 });
 
+themeButton?.addEventListener("click", () => {
+  toggleTheme().catch((error) => {
+    console.error("Failed to toggle theme", error);
+  });
+});
+
+loadTheme();
 loadPrompt();
 loadHistory();
