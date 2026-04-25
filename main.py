@@ -89,7 +89,8 @@ async def force_cors_headers(request, call_next):
 EXTENSION_RETENTION_SECONDS = 30 * 60
 extension_history: dict[str, dict[str, Any]] = {}
 extension_preferences: dict[str, str] = {
-    "user_prompt": "Graph the rentals I've been looking at."
+    "user_prompt": "Graph the rentals I've been looking at.",
+    "enable_discovery": "false",
 }
 
 
@@ -136,7 +137,8 @@ class ExtensionSnapshot(StrictModel):
 
 
 class ExtensionPreferencesRequest(StrictModel):
-    user_prompt: str = Field(min_length=1, max_length=400)
+    user_prompt: str | None = Field(default=None, min_length=1, max_length=400)
+    enable_discovery: bool | None = None
 
 
 class ComparisonRubric(StrictModel):
@@ -156,6 +158,14 @@ class ComparisonRubric(StrictModel):
         max_length=8,
         description="Patterns observed specifically from the user-provided seed items.",
     )
+    x_axis_label: str = Field(description="Human-readable label for the chart's x axis.")
+    x_axis_score_field: str = Field(description="Exact node field name for the x-axis 0-100 score.")
+    x_axis_low: str = Field(description="What the low end of the x axis means.")
+    x_axis_high: str = Field(description="What the high end of the x axis means.")
+    y_axis_label: str = Field(description="Human-readable label for the chart's y axis.")
+    y_axis_score_field: str = Field(description="Exact node field name for the y-axis 0-100 score.")
+    y_axis_low: str = Field(description="What the low end of the y axis means.")
+    y_axis_high: str = Field(description="What the high end of the y axis means.")
 
 
 class EvaluationState(StrictModel):
@@ -392,6 +402,52 @@ def _wants_external_reviews(user_prompt: str) -> bool:
         "owners",
     )
     return any(token in prompt for token in review_tokens)
+
+
+def _extension_pref_enabled(key: str, default: bool = False) -> bool:
+    raw = str(extension_preferences.get(key, "true" if default else "false")).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _extension_firecrawl_budget() -> int:
+    return DEFAULT_FIRECRAWL_QUERY_BUDGET if _extension_pref_enabled("enable_discovery") else 0
+
+
+def _rubric_axis_config_for_domain(domain: str) -> dict[str, str]:
+    if domain == "housing":
+        return {
+            "x_axis_label": "Cost efficiency",
+            "x_axis_score_field": "Cost Efficiency Score",
+            "x_axis_low": "Expensive for the fit",
+            "x_axis_high": "Efficient for the fit",
+            "y_axis_label": "Fit confidence",
+            "y_axis_score_field": "Fit Confidence Score",
+            "y_axis_low": "Weak match",
+            "y_axis_high": "Strong match",
+        }
+
+    if domain == "products":
+        return {
+            "x_axis_label": "Value for money",
+            "x_axis_score_field": "Value Score",
+            "x_axis_low": "Poor value",
+            "x_axis_high": "Strong value",
+            "y_axis_label": "Cooling confidence",
+            "y_axis_score_field": "Cooling Confidence Score",
+            "y_axis_low": "Weak cooling",
+            "y_axis_high": "Strong cooling",
+        }
+
+    return {
+        "x_axis_label": "Evidence strength",
+        "x_axis_score_field": "Evidence Strength Score",
+        "x_axis_low": "Thin evidence",
+        "x_axis_high": "Strong evidence",
+        "y_axis_label": "Prompt fit",
+        "y_axis_score_field": "Prompt Fit Score",
+        "y_axis_low": "Loose fit",
+        "y_axis_high": "Strong fit",
+    }
 
 
 def _supports_response_format_for_schema(schema_name: str) -> bool:
@@ -765,6 +821,7 @@ async def _structured_llm_call(
 
 async def _build_rubric(payload: SynthesizeRequest, base_context: str) -> ComparisonRubric:
     domain = _infer_session_domain(payload.user_prompt, None)
+    axis_config = _rubric_axis_config_for_domain(domain)
     inferred_constraints: list[str] = []
     if payload.user_constraint:
         inferred_constraints.append(payload.user_constraint.strip())
@@ -789,6 +846,7 @@ async def _build_rubric(payload: SynthesizeRequest, base_context: str) -> Compar
                 "Compare concrete listing facts instead of marketing copy",
                 "Preserve captured listings as the primary decision set",
             ],
+            **axis_config,
         )
 
     if domain == "products":
@@ -814,6 +872,7 @@ async def _build_rubric(payload: SynthesizeRequest, base_context: str) -> Compar
                 "Preserve the currently captured product set as the main comparison board",
                 "Highlight budget, noise, and cooling tradeoffs explicitly",
             ],
+            **axis_config,
         )
 
     return ComparisonRubric(
@@ -830,6 +889,7 @@ async def _build_rubric(payload: SynthesizeRequest, base_context: str) -> Compar
             "Prefer concise comparisons grounded in captured evidence",
             "Use discovery only when the prompt explicitly asks for broader investigation",
         ],
+        **axis_config,
     )
 
 
@@ -932,6 +992,12 @@ async def _synthesize_graph(
             "Each node must include top-level fields title, url, sourceType, aiRank, aiReason, summary, "
             "constraintViolated, constraintReason, and attributes. Use attributes for rubric facts as "
             "{label, value} pairs, using exact rubric field names whenever possible. "
+            f"Every node must also include two quantifiable rubric scores on a 0-100 scale in attributes named "
+            f"'{rubric.x_axis_score_field}' and '{rubric.y_axis_score_field}'. "
+            f"'{rubric.x_axis_score_field}' measures {rubric.x_axis_label.lower()} where 0 means "
+            f"'{rubric.x_axis_low}' and 100 means '{rubric.x_axis_high}'. "
+            f"'{rubric.y_axis_score_field}' measures {rubric.y_axis_label.lower()} where 0 means "
+            f"'{rubric.y_axis_low}' and 100 means '{rubric.y_axis_high}'. "
             "Do not stuff product specs, listing facts, or rankings into constraintReason. "
             "constraintReason is only for the user constraint result and must be empty when no user constraint is provided. "
             "Create meaningful edges between related products, concepts, tradeoffs, or evidence. Keep the user-provided seed items "
@@ -951,6 +1017,10 @@ async def _synthesize_graph(
             f"Inferred constraints:\n{rubric.inferred_constraints}\n\n"
             f"Seed patterns:\n{rubric.seed_patterns}\n\n"
             f"Default ordering:\n{rubric.default_ordering}\n\n"
+            f"Chart rubric X axis:\n{rubric.x_axis_label} via attribute '{rubric.x_axis_score_field}' "
+            f"on a 0-100 scale ({rubric.x_axis_low} -> {rubric.x_axis_high})\n\n"
+            f"Chart rubric Y axis:\n{rubric.y_axis_label} via attribute '{rubric.y_axis_score_field}' "
+            f"on a 0-100 scale ({rubric.y_axis_low} -> {rubric.y_axis_high})\n\n"
             f"Collected context:\n{context}\n\n"
             "Return strict graph data with nodes and edges only. Each node must contain: "
             "id, type, title, url, sourceType, aiRank, aiReason, summary, constraintViolated, constraintReason, and attributes. "
@@ -1378,6 +1448,8 @@ def _synthesized_graph_to_react_flow(graph: SynthesizedGraphData) -> ReactFlowGr
 
 def _canonicalize_graph_for_frontend(graph: ReactFlowGraphData) -> ReactFlowGraphData:
     payload = graph.model_dump()
+    domain = _infer_session_domain("", graph)
+    axis_config = _rubric_axis_config_for_domain(domain)
     for index, node in enumerate(payload.get("nodes", [])):
         raw_data = dict(node.get("data") or {})
         brand = _stringify_data_value(_lookup_data_value(raw_data, ["Brand", "brand"]))
@@ -1402,6 +1474,14 @@ def _canonicalize_graph_for_frontend(graph: ReactFlowGraphData) -> ReactFlowGrap
         rental_type = _stringify_data_value(_lookup_data_value(raw_data, ["rentalType", "Rental Type", "Cooling Method", "Cooling Mechanism", "Maximum Laptop Size Supported"]), "Unknown")
         ai_rank = _parse_data_number(_lookup_data_value(raw_data, ["aiRank", "AI Rank", "rank"]), index + 1)
         combined_score = _parse_data_number(_lookup_data_value(raw_data, ["combinedScore", "Combined Score", "score"]), max(0, 100 - int(ai_rank) * 10))
+        x_axis_score = _parse_data_number(
+            _lookup_data_value(raw_data, [axis_config["x_axis_score_field"], "xAxisScore", "X Axis Score"]),
+            combined_score,
+        )
+        y_axis_score = _parse_data_number(
+            _lookup_data_value(raw_data, [axis_config["y_axis_score_field"], "yAxisScore", "Y Axis Score"]),
+            combined_score,
+        )
         ai_reason = _stringify_data_value(_lookup_data_value(raw_data, ["aiReason", "AI Reason", "reason"]))
         summary = (
             _stringify_data_value(_lookup_data_value(raw_data, ["summary", "oneSentenceSummary", "description"]))
@@ -1439,6 +1519,14 @@ def _canonicalize_graph_for_frontend(graph: ReactFlowGraphData) -> ReactFlowGrap
             "squareFeet": square_feet,
             "rentalType": rental_type,
             "combinedScore": combined_score,
+            "xAxisScore": max(0, min(100, x_axis_score)),
+            "yAxisScore": max(0, min(100, y_axis_score)),
+            "xAxisLabel": axis_config["x_axis_label"],
+            "xAxisLow": axis_config["x_axis_low"],
+            "xAxisHigh": axis_config["x_axis_high"],
+            "yAxisLabel": axis_config["y_axis_label"],
+            "yAxisLow": axis_config["y_axis_low"],
+            "yAxisHigh": axis_config["y_axis_high"],
             "aiRank": ai_rank,
             "aiReason": ai_reason,
             "reviewSentiment": review_sentiment,
@@ -1563,6 +1651,12 @@ def _session_subtitle_for_node(data: dict[str, Any]) -> str:
         return _stringify_data_value(data.get("sourceLabel"), "External review")
 
     metric_bits: list[str] = []
+    x_axis_score = _parse_data_number(data.get("xAxisScore"))
+    y_axis_score = _parse_data_number(data.get("yAxisScore"))
+    if x_axis_score > 0:
+        metric_bits.append(f"X {int(round(x_axis_score))}")
+    if y_axis_score > 0:
+        metric_bits.append(f"Y {int(round(y_axis_score))}")
     price_usd = _parse_data_number(data.get("priceUsd"))
     if price_usd > 0:
         metric_bits.append(f"${price_usd:,.0f}")
@@ -1605,6 +1699,8 @@ def _session_metadata_for_node(data: dict[str, Any]) -> dict[str, Any]:
         "bathrooms",
         "squareFeet",
         "combinedScore",
+        "xAxisScore",
+        "yAxisScore",
         "aiRank",
         "fanSpeedRpm",
         "noiseLevelDb",
@@ -1614,7 +1710,23 @@ def _session_metadata_for_node(data: dict[str, Any]) -> dict[str, Any]:
         if isinstance(value, (int, float)) and value not in (0, 0.0):
             metadata[key] = value
 
-    for key in ["rentalType", "locationLabel", "sourceType", "statusLabel", "kindLabel", "noiseDisplay", "coolingPerformance", "reviewSentiment", "reviewSentimentLabel"]:
+    for key in [
+        "rentalType",
+        "locationLabel",
+        "sourceType",
+        "statusLabel",
+        "kindLabel",
+        "noiseDisplay",
+        "coolingPerformance",
+        "reviewSentiment",
+        "reviewSentimentLabel",
+        "xAxisLabel",
+        "xAxisLow",
+        "xAxisHigh",
+        "yAxisLabel",
+        "yAxisLow",
+        "yAxisHigh",
+    ]:
         value = _stringify_data_value(data.get(key))
         if value and value != "Unknown":
             metadata[key] = value
@@ -2065,14 +2177,23 @@ async def extension_snapshot(payload: ExtensionSnapshot) -> dict[str, str]:
 
 
 @app.get("/api/v1/extension/preferences")
-async def extension_preferences_view() -> dict[str, str]:
-    return extension_preferences
+async def extension_preferences_view() -> dict[str, Any]:
+    return {
+        "user_prompt": extension_preferences.get("user_prompt", ""),
+        "enable_discovery": _extension_pref_enabled("enable_discovery"),
+    }
 
 
 @app.post("/api/v1/extension/preferences")
-async def extension_preferences_update(payload: ExtensionPreferencesRequest) -> dict[str, str]:
-    extension_preferences["user_prompt"] = payload.user_prompt.strip()
-    return extension_preferences
+async def extension_preferences_update(payload: ExtensionPreferencesRequest) -> dict[str, Any]:
+    if payload.user_prompt is not None:
+        extension_preferences["user_prompt"] = payload.user_prompt.strip()
+    if payload.enable_discovery is not None:
+        extension_preferences["enable_discovery"] = "true" if payload.enable_discovery else "false"
+    return {
+        "user_prompt": extension_preferences.get("user_prompt", ""),
+        "enable_discovery": _extension_pref_enabled("enable_discovery"),
+    }
 
 
 @app.get("/api/v1/extension/history")
@@ -2089,6 +2210,7 @@ async def extension_history_stats() -> dict[str, Any]:
     return {
         "count": len(tabs),
         "user_prompt": extension_preferences.get("user_prompt", ""),
+        "enable_discovery": _extension_pref_enabled("enable_discovery"),
         "recent": [
             {
                 "url": entry.get("url", ""),
@@ -2291,7 +2413,11 @@ async def synthesize_from_extension_history(payload: SynthesizeFromExtensionRequ
         dom_payload = SynthesizeFromDomRequest(
             user_prompt=payload.user_prompt,
             user_constraint=payload.user_constraint,
-            firecrawl_query_budget=payload.firecrawl_query_budget,
+            firecrawl_query_budget=(
+                payload.firecrawl_query_budget
+                if "firecrawl_query_budget" in payload.model_fields_set
+                else _extension_firecrawl_budget()
+            ),
             tabs=[
                 DomTab(
                     url=entry["url"],

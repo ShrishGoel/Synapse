@@ -5,9 +5,9 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8010";
 const DEFAULT_QUERY = "Compare the laptop coolers";
 const BOARD_WIDTH = 1160;
 const BOARD_MIN_HEIGHT = 620;
-const NODE_WIDTH = 248;
-const NODE_HEIGHT = 206;
-const NODE_GAP = 34;
+const NODE_WIDTH = 184;
+const NODE_HEIGHT = 106;
+const NODE_GAP = 20;
 const BOARD_PADDING = 34;
 const BOARD_MAX_COLUMNS = 4;
 const VIEWS = ["board", "digest", "compare"];
@@ -137,16 +137,39 @@ function getNodeSortValue(node, sortMode) {
   return metaNumber(node, "aiRank") ?? Number.POSITIVE_INFINITY;
 }
 
-function axisMetaForDomain(domain) {
-  if (domain === "housing") {
+function axisMetaForDomain(domain, nodes) {
+  const firstNode = nodes.find(Boolean);
+  const xLabel = metaText(firstNode, "xAxisLabel", "");
+  const xLow = metaText(firstNode, "xAxisLow", "");
+  const xHigh = metaText(firstNode, "xAxisHigh", "");
+  const yLabel = metaText(firstNode, "yAxisLabel", "");
+  const yLow = metaText(firstNode, "yAxisLow", "");
+  const yHigh = metaText(firstNode, "yAxisHigh", "");
+
+  if (xLabel && yLabel) {
     return {
-      x: { label: "Rank confidence", low: "Lower", high: "Higher" },
-      y: { label: "Fit", low: "Worse", high: "Better" },
+      x: { label: xLabel, low: xLow || "Lower", high: xHigh || "Higher" },
+      y: { label: yLabel, low: yLow || "Lower", high: yHigh || "Higher" },
     };
   }
+
+  if (domain === "housing") {
+    return {
+      x: { label: "Cost efficiency", low: "Expensive for the fit", high: "Efficient for the fit" },
+      y: { label: "Fit confidence", low: "Weak match", high: "Strong match" },
+    };
+  }
+
+  if (domain === "products") {
+    return {
+      x: { label: "Value for money", low: "Poor value", high: "Strong value" },
+      y: { label: "Cooling confidence", low: "Weak cooling", high: "Strong cooling" },
+    };
+  }
+
   return {
-    x: { label: "Rank confidence", low: "Lower", high: "Higher" },
-    y: { label: "Fit", low: "Worse", high: "Better" },
+    x: { label: "Evidence strength", low: "Thin evidence", high: "Strong evidence" },
+    y: { label: "Prompt fit", low: "Loose fit", high: "Strong fit" },
   };
 }
 
@@ -185,28 +208,16 @@ function computeLayout(nodes, domain, viewportWidth, boardWidth, boardHeight) {
   }
 
   const rankedNodes = [...nodes];
-  const priceValues = rankedNodes.map((node) => metaNumber(node, "priceUsd")).filter((value) => value !== null);
-  const scoreValues = rankedNodes.map((node) => metaNumber(node, "combinedScore")).filter((value) => value !== null);
-  const aiRanks = rankedNodes.map((node) => metaNumber(node, "aiRank")).filter((value) => value !== null);
-  const priceMin = priceValues.length ? Math.min(...priceValues) : 0;
-  const priceMax = priceValues.length ? Math.max(...priceValues) : 0;
-  const scoreMin = scoreValues.length ? Math.min(...scoreValues) : 0;
-  const scoreMax = scoreValues.length ? Math.max(...scoreValues) : 0;
-  const rankMin = aiRanks.length ? Math.min(...aiRanks) : 1;
-  const rankMax = aiRanks.length ? Math.max(...aiRanks) : 1;
   const xRange = Math.max(0, boardWidth - NODE_WIDTH - BOARD_PADDING * 2);
   const yRange = Math.max(0, boardHeight - NODE_HEIGHT - BOARD_PADDING * 2);
   const targetPositions = {};
 
   rankedNodes.forEach((node) => {
-    const rank = metaNumber(node, "aiRank") ?? rankMax;
-    const combinedScore = metaNumber(node, "combinedScore") ?? scoreMin;
-    const price = metaNumber(node, "priceUsd");
-    const rankNormalized = rankMax > rankMin ? 1 - (rank - rankMin) / (rankMax - rankMin) : 1;
-    const fitNormalized = scoreMax > scoreMin ? (combinedScore - scoreMin) / (scoreMax - scoreMin) : 0.65;
-    const pricePenalty = price !== null && priceMax > priceMin ? (price - priceMin) / (priceMax - priceMin) : 0.2;
-    const xNormalized = Math.max(0, Math.min(1, rankNormalized * 0.8 + (1 - pricePenalty) * 0.2));
-    const yNormalizedBase = Math.max(0, Math.min(1, fitNormalized));
+    const xScore = metaNumber(node, "xAxisScore");
+    const yScore = metaNumber(node, "yAxisScore");
+    const fallbackScore = metaNumber(node, "combinedScore");
+    const xNormalized = Math.max(0, Math.min(1, (xScore ?? fallbackScore ?? 50) / 100));
+    const yNormalizedBase = Math.max(0, Math.min(1, (yScore ?? fallbackScore ?? 65) / 100));
     const yNormalized = isViolated(node) ? Math.min(0.18, yNormalizedBase * 0.35) : Math.max(0.12, yNormalizedBase);
     targetPositions[node.id] = {
       x: BOARD_PADDING + xNormalized * xRange,
@@ -217,8 +228,8 @@ function computeLayout(nodes, domain, viewportWidth, boardWidth, boardHeight) {
 
   const orderedIds = rankedNodes
     .sort((left, right) => {
-      const leftScore = metaNumber(left, "combinedScore") ?? scoreMin;
-      const rightScore = metaNumber(right, "combinedScore") ?? scoreMin;
+      const leftScore = metaNumber(left, "yAxisScore") ?? metaNumber(left, "combinedScore") ?? 0;
+      const rightScore = metaNumber(right, "yAxisScore") ?? metaNumber(right, "combinedScore") ?? 0;
       if (leftScore !== rightScore) {
         return rightScore - leftScore;
       }
@@ -292,7 +303,6 @@ async function fetchSession(query, constraint) {
     body: JSON.stringify({
       user_prompt: query,
       user_constraint: constraint || null,
-      firecrawl_query_budget: 4,
       max_tabs: 20,
     }),
   });
@@ -326,9 +336,11 @@ async function applyConstraintToSession(session, constraint) {
 function BoardCard({ node, active, onSelect }) {
   const color = TYPE_CLR[normalizeType(node.type)] || TYPE_CLR.item;
   const price = metaNumber(node, "priceUsd");
-  const noise = metaNumber(node, "noiseLevelDb");
-  const cooling = metaText(node, "coolingPerformance");
   const violated = isViolated(node);
+  const aiRank = metaNumber(node, "aiRank");
+  const xScore = metaNumber(node, "xAxisScore");
+  const yScore = metaNumber(node, "yAxisScore");
+  const subtitle = node.subtitle || metaText(node, "kindLabel", metaText(node, "sourceLabel", ""));
 
   return (
     <motion.button
@@ -340,7 +352,7 @@ function BoardCard({ node, active, onSelect }) {
       style={{
         width: NODE_WIDTH,
         minHeight: NODE_HEIGHT,
-        padding: 14,
+        padding: 12,
         borderRadius: 16,
         textAlign: "left",
         border: `1px solid ${violated ? "#ef4444" : active ? color : "rgba(255,255,255,0.08)"}`,
@@ -357,27 +369,53 @@ function BoardCard({ node, active, onSelect }) {
           {node.source}
         </span>
         <span style={{ width: 6, height: 6, borderRadius: "50%", background: STAT_CLR[node.status] || "#6b7280" }} />
-        <span style={{ marginLeft: "auto", fontSize: 10, color: violated ? "#fca5a5" : "#81838d" }}>
-          {violated ? "flagged" : "fit"}
+        <span style={{ marginLeft: "auto", fontSize: 10, color: violated ? "#fca5a5" : "#cbd5e1" }}>
+          {aiRank ? `#${aiRank}` : violated ? "flagged" : "fit"}
         </span>
       </div>
-      <div style={{ fontWeight: 600, fontSize: 15, lineHeight: 1.3 }}>{node.title}</div>
-      <div style={{ fontSize: 12, color: "#8f96a3", marginTop: 4, minHeight: 32 }}>{node.subtitle}</div>
+      <div
+        style={{
+          fontWeight: 600,
+          fontSize: 12,
+          lineHeight: 1.25,
+          display: "-webkit-box",
+          WebkitLineClamp: 3,
+          WebkitBoxOrient: "vertical",
+          overflow: "hidden",
+        }}
+      >
+        {node.title}
+      </div>
+      <div
+        style={{
+          fontSize: 10,
+          color: "#8f96a3",
+          marginTop: 4,
+          minHeight: 14,
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {subtitle}
+      </div>
       {violated && node.metadata?.constraintReason ? (
-        <div style={{ marginTop: 8, fontSize: 11, color: "#fca5a5" }}>{node.metadata.constraintReason}</div>
+        <div style={{ marginTop: 6, fontSize: 10, color: "#fca5a5", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          {node.metadata.constraintReason}
+        </div>
       ) : null}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginTop: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginTop: 8 }}>
         <div>
-          <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase" }}>Price</div>
-          <div style={{ fontSize: 13 }}>{price ? `$${price.toFixed(0)}` : "Unknown"}</div>
+          <div style={{ fontSize: 9, color: "#6b7280", textTransform: "uppercase" }}>Price</div>
+          <div style={{ fontSize: 10, lineHeight: 1.2 }}>{price ? `$${price.toFixed(0)}` : "--"}</div>
         </div>
         <div>
-          <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase" }}>Noise</div>
-          <div style={{ fontSize: 13 }}>{noise ? `${noise.toFixed(0)} dB` : metaText(node, "noiseDisplay")}</div>
+          <div style={{ fontSize: 9, color: "#6b7280", textTransform: "uppercase" }}>X</div>
+          <div style={{ fontSize: 10, lineHeight: 1.2 }}>{xScore !== null ? Math.round(xScore) : "--"}</div>
         </div>
         <div>
-          <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase" }}>Cooling</div>
-          <div style={{ fontSize: 13 }}>{cooling}</div>
+          <div style={{ fontSize: 9, color: "#6b7280", textTransform: "uppercase" }}>Y</div>
+          <div style={{ fontSize: 10, lineHeight: 1.2 }}>{yScore !== null ? Math.round(yScore) : "--"}</div>
         </div>
       </div>
     </motion.button>
@@ -483,7 +521,6 @@ export default function App() {
     [data],
   );
   const selectedNode = selected ? nodeMap[selected] : null;
-  const boardAxes = useMemo(() => axisMetaForDomain(data?.domain), [data]);
 
   const allNodes = useMemo(() => data?.graph?.nodes || [], [data]);
   const visibleNodes = useMemo(() => {
@@ -511,6 +548,7 @@ export default function App() {
         .sort((left, right) => (metaNumber(left, "aiRank") ?? 999) - (metaNumber(right, "aiRank") ?? 999)),
     [visibleNodes],
   );
+  const boardAxes = useMemo(() => axisMetaForDomain(data?.domain, boardNodes), [data?.domain, boardNodes]);
 
   const boardNodeIds = useMemo(() => new Set(boardNodes.map((node) => node.id)), [boardNodes]);
   const visibleNodeIds = useMemo(() => new Set(visibleNodes.map((node) => node.id)), [visibleNodes]);
@@ -573,7 +611,7 @@ export default function App() {
   }, []);
 
   const baseDigestEntries = useMemo(() => {
-    const entries = [...(data?.digest?.entries || [])].filter((entry) => visibleNodeIds.has(entry.node_id));
+    const entries = [...(data?.digest?.entries || [])].filter((entry) => boardNodeIds.has(entry.node_id));
     return entries.sort((left, right) => {
       const leftNode = nodeMap[left.node_id];
       const rightNode = nodeMap[right.node_id];
@@ -587,7 +625,15 @@ export default function App() {
       }
       return right.relevance - left.relevance;
     });
-  }, [data, nodeMap, sortMode, visibleNodeIds]);
+  }, [boardNodeIds, data, nodeMap, sortMode]);
+
+  const reviewDigestEntries = useMemo(
+    () =>
+      [...(data?.digest?.entries || [])]
+        .filter((entry) => visibleNodeIds.has(entry.node_id) && reviewNodes.some((node) => node.id === entry.node_id))
+        .sort((left, right) => right.relevance - left.relevance),
+    [data, reviewNodes, visibleNodeIds],
+  );
 
   useEffect(() => {
     setDigestOrder([]);
@@ -818,7 +864,7 @@ export default function App() {
               <div style={{ ...label, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <span>Board</span>
                 <span style={{ color: "#8d93a0", textTransform: "none", letterSpacing: 0 }}>
-                  Two axes are back: better fit rises upward, better rank moves right.
+                  Higher rubric scores move up and to the right.
                 </span>
               </div>
               <div style={{ ...card, padding: 12, overflow: "auto", minHeight: 520 }}>
@@ -831,7 +877,7 @@ export default function App() {
                     borderRadius: 18,
                     overflow: "hidden",
                     background:
-                      "linear-gradient(135deg, rgba(127,29,29,0.34) 0%, rgba(24,24,27,0.86) 40%, rgba(21,128,61,0.30) 100%)",
+                      "linear-gradient(to top right, rgba(127,29,29,0.42) 0%, rgba(24,24,27,0.88) 48%, rgba(21,128,61,0.42) 100%)",
                   }}
                 >
                   <div
@@ -839,7 +885,7 @@ export default function App() {
                       position: "absolute",
                       inset: 0,
                       background:
-                        "linear-gradient(135deg, rgba(248,113,113,0.08) 0%, rgba(248,113,113,0) 38%, rgba(74,222,128,0.14) 100%)",
+                        "radial-gradient(circle at 18% 82%, rgba(248,113,113,0.16) 0%, rgba(248,113,113,0.03) 26%, rgba(248,113,113,0) 44%), radial-gradient(circle at 86% 18%, rgba(74,222,128,0.18) 0%, rgba(74,222,128,0.05) 24%, rgba(74,222,128,0) 42%)",
                       pointerEvents: "none",
                     }}
                   />
@@ -978,6 +1024,44 @@ export default function App() {
                   />
                 ))}
               </div>
+              {reviewDigestEntries.length ? (
+                <div style={{ marginTop: 14 }}>
+                  <div style={{ ...label, marginBottom: 10 }}>External Review Signals</div>
+                  <div style={{ display: "grid", gap: 10 }}>
+                    {reviewDigestEntries.map((entry) => {
+                      const node = nodeMap[entry.node_id];
+                      return (
+                        <button
+                          key={entry.node_id}
+                          type="button"
+                          onClick={() => setSelected((prev) => (prev === entry.node_id ? null : entry.node_id))}
+                          style={{
+                            ...card,
+                            padding: 12,
+                            textAlign: "left",
+                            cursor: "pointer",
+                            borderColor: selected === entry.node_id ? "#ef4444" : "rgba(239,68,68,0.18)",
+                            background: "rgba(56,20,20,0.2)",
+                          }}
+                        >
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                            <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "#fca5a5", letterSpacing: "0.08em" }}>
+                              {node?.source || "Review"}
+                            </span>
+                            <span style={{ ...pill, padding: "2px 8px", fontSize: 10, color: "#fecaca", border: "1px solid rgba(248,113,113,0.18)", background: "rgba(127,29,29,0.18)" }}>
+                              not ranked
+                            </span>
+                          </div>
+                          <div style={{ fontSize: 14, fontWeight: 600 }}>{node?.title || entry.node_id}</div>
+                          <div style={{ marginTop: 6, fontSize: 12, color: "#d8c7c7", lineHeight: 1.5 }}>
+                            {entry.summary}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
             </section>
           )}
 

@@ -5,6 +5,7 @@ const emptyState = document.querySelector("#emptyState");
 const template = document.querySelector("#historyItemTemplate");
 const promptForm = document.querySelector("#promptForm");
 const promptInput = document.querySelector("#promptInput");
+const discoveryToggle = document.querySelector("#discoveryToggle");
 const statusToast = document.querySelector("#statusToast");
 const toastMessage = document.querySelector("#toastMessage");
 const themeButton = document.querySelector("#themeButton");
@@ -13,6 +14,7 @@ const FRONTEND_URL = "http://localhost:5173";
 const BACKEND_BASE_URL = "http://127.0.0.1:8010";
 const DEFAULT_PROMPT = "Compare the laptop coolers";
 const PROMPT_STORAGE_KEY = "synapseUserPrompt";
+const DISCOVERY_STORAGE_KEY = "synapseEnableDiscovery";
 const THEME_STORAGE_KEY = "synapsePopupTheme";
 
 function formatTime(timestamp) {
@@ -73,6 +75,15 @@ async function loadStoredPrompt() {
 
 async function saveStoredPrompt(prompt) {
   await chrome.storage.local.set({ [PROMPT_STORAGE_KEY]: prompt });
+}
+
+async function loadStoredDiscoveryEnabled() {
+  const data = await chrome.storage.local.get({ [DISCOVERY_STORAGE_KEY]: false });
+  return Boolean(data?.[DISCOVERY_STORAGE_KEY]);
+}
+
+async function saveStoredDiscoveryEnabled(enabled) {
+  await chrome.storage.local.set({ [DISCOVERY_STORAGE_KEY]: Boolean(enabled) });
 }
 
 function applyTheme(theme) {
@@ -188,6 +199,9 @@ async function loadHistory() {
 
 async function loadPrompt() {
   promptInput.value = await loadStoredPrompt();
+  if (discoveryToggle) {
+    discoveryToggle.checked = await loadStoredDiscoveryEnabled();
+  }
 
   try {
     const response = await fetch(`${BACKEND_BASE_URL}/api/v1/extension/preferences`);
@@ -198,6 +212,10 @@ async function loadPrompt() {
     const payload = await response.json();
     const resolvedPrompt = String(payload.user_prompt || "").trim() || promptInput.value || DEFAULT_PROMPT;
     promptInput.value = resolvedPrompt;
+    if (discoveryToggle) {
+      discoveryToggle.checked = Boolean(payload.enable_discovery);
+      await saveStoredDiscoveryEnabled(discoveryToggle.checked);
+    }
     await saveStoredPrompt(resolvedPrompt);
   } catch (_) {
     // Keep the popup usable even when the backend is offline.
@@ -213,6 +231,7 @@ async function openSynapse() {
 
   try {
     await saveStoredPrompt(prompt);
+    await saveStoredDiscoveryEnabled(Boolean(discoveryToggle?.checked));
     summary.textContent = "Preparing graph...";
 
     let syncPayload = { attempted: 0 };
@@ -226,7 +245,10 @@ async function openSynapse() {
       await fetch(`${BACKEND_BASE_URL}/api/v1/extension/preferences`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_prompt: prompt }),
+        body: JSON.stringify({
+          user_prompt: prompt,
+          enable_discovery: Boolean(discoveryToggle?.checked),
+        }),
       });
     } catch (_) {
       // Query string still carries the prompt to the frontend.
@@ -271,6 +293,12 @@ clearButton.addEventListener("click", async () => {
 themeButton?.addEventListener("click", () => {
   toggleTheme().catch((error) => {
     console.error("Failed to toggle theme", error);
+  });
+});
+
+discoveryToggle?.addEventListener("change", () => {
+  saveStoredDiscoveryEnabled(Boolean(discoveryToggle.checked)).catch((error) => {
+    console.error("Failed to persist discovery setting", error);
   });
 });
 
