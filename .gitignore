@@ -127,6 +127,7 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+.codex/
 
 # Local test/debug artifacts
 .pytest_cache/
