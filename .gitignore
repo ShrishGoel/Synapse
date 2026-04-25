@@ -101,6 +101,9 @@ backend/.env
 
 # Javascript / Node
 node_modules/
+frontend/dist/
+.next/
+.vite/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -124,3 +127,9 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Local test/debug artifacts
+.pytest_cache/
+__pycache__/
+*.log
+.visual-*.png
