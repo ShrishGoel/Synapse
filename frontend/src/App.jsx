@@ -1,16 +1,25 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import {
+  BookText,
+  LayoutGrid,
+  Loader2,
+  Search,
+  SlidersHorizontal,
+  Sparkles,
+  Table2,
+  X,
+} from "lucide-react";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8010";
 const DEFAULT_QUERY = "Compare the laptop coolers";
-const BOARD_WIDTH = 1160;
-const BOARD_MIN_HEIGHT = 620;
-const NODE_WIDTH = 248;
-const NODE_HEIGHT = 206;
-const NODE_GAP = 34;
-const BOARD_PADDING = 34;
+const BOARD_WIDTH = 1400;
+const BOARD_MIN_HEIGHT = 780;
+const NODE_WIDTH = 252;
+const NODE_HEIGHT = 212;
+const NODE_GAP = 48;
+const BOARD_PADDING = 56;
 const BOARD_MAX_COLUMNS = 4;
-const VIEWS = ["board", "digest", "compare"];
 const SORT_OPTIONS = [
   { value: "ai", label: "AI best choice" },
   { value: "price", label: "Price" },
@@ -18,59 +27,59 @@ const SORT_OPTIONS = [
 ];
 
 const TYPE_CLR = {
-  listing: "#3b82f6",
-  review: "#ef4444",
-  location: "#22c55e",
-  enrichment: "#a855f7",
-  reference: "#f59e0b",
-  item: "#14b8a6",
-  laptop_cooler: "#14b8a6",
-};
-const SENT_CLR = { positive: "#22c55e", neutral: "#6b7280", negative: "#ef4444", unknown: "#eab308" };
-const STAT_CLR = { ready: "#22c55e", flagged: "#ef4444", pending: "#6b7280" };
-const EDGE_CLR = {
-  mentions: "rgba(239,68,68,0.35)",
-  competes_with: "rgba(59,130,246,0.2)",
-  located_in: "rgba(255,255,255,0.08)",
-  enriches: "rgba(168,85,247,0.2)",
-  related_to: "rgba(255,255,255,0.14)",
+  listing: "#d0ab67",
+  review: "#c98673",
+  location: "#8ca38f",
+  enrichment: "#b09a74",
+  reference: "#b9aa86",
+  item: "#93a696",
+  laptop_cooler: "#93a696",
 };
 
-const pill = {
-  padding: "4px 10px",
+const SENT_CLR = {
+  positive: "#9eb785",
+  neutral: "#aaa08d",
+  negative: "#c98673",
+  unknown: "#c7ac6b",
+};
+
+const STAT_CLR = {
+  ready: "#9eb785",
+  flagged: "#c98673",
+  pending: "#aaa08d",
+};
+
+const EDGE_CLR = {
+  mentions: "rgba(201, 134, 115, 0.34)",
+  competes_with: "rgba(208, 171, 103, 0.2)",
+  located_in: "rgba(236, 228, 214, 0.08)",
+  enriches: "rgba(147, 166, 150, 0.18)",
+  related_to: "rgba(236, 228, 214, 0.12)",
+};
+
+const pillStyle = {
+  padding: "6px 10px",
   borderRadius: 999,
-  fontSize: 12,
-  background: "rgba(255,255,255,0.06)",
-  color: "#d1d5db",
-  border: "1px solid rgba(255,255,255,0.06)",
-};
-const card = {
-  borderRadius: 14,
-  border: "1px solid rgba(255,255,255,0.06)",
-  background: "rgba(255,255,255,0.03)",
-};
-const label = {
   fontSize: 11,
-  textTransform: "uppercase",
-  letterSpacing: "0.06em",
-  color: "#6b7280",
-  marginBottom: 8,
+  background: "rgba(245, 238, 226, 0.035)",
+  color: "#d7d1c6",
+  border: "1px solid rgba(236, 228, 214, 0.08)",
 };
 
 function Badge({ sentiment, children }) {
-  const bg = {
-    positive: "rgba(34,197,94,0.15)",
-    neutral: "rgba(107,114,128,0.15)",
-    negative: "rgba(239,68,68,0.15)",
-    unknown: "rgba(234,179,8,0.15)",
-  };
   return (
     <span
       style={{
-        ...pill,
-        background: bg[sentiment] || bg.unknown,
+        ...pillStyle,
         color: SENT_CLR[sentiment] || SENT_CLR.unknown,
-        fontWeight: 500,
+        background:
+          sentiment === "positive"
+            ? "rgba(158, 183, 133, 0.14)"
+            : sentiment === "negative"
+              ? "rgba(201, 134, 115, 0.14)"
+              : sentiment === "neutral"
+                ? "rgba(170, 160, 141, 0.12)"
+                : "rgba(199, 172, 107, 0.14)",
       }}
     >
       {children}
@@ -86,7 +95,9 @@ function normalizeType(value) {
 }
 
 function numberOrNull(value) {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : null;
 }
 
 function metaNumber(node, key) {
@@ -113,6 +124,7 @@ function isExternalReviewNode(node) {
   const type = normalizeType(node?.type);
   const group = String(node?.group || "").toLowerCase();
   const sourceType = String(node?.metadata?.sourceType || "").toLowerCase();
+
   return (
     type === "review" ||
     group === "reviews" ||
@@ -137,16 +149,18 @@ function getNodeSortValue(node, sortMode) {
   return metaNumber(node, "aiRank") ?? Number.POSITIVE_INFINITY;
 }
 
+function nodeXForDomain(node, domain) {
+  return metaNumber(node, "combinedScore") ?? Number.POSITIVE_INFINITY;
+}
+
+function nodeYForDomain(node, domain) {
+  return metaNumber(node, "aiRank") ?? Number.POSITIVE_INFINITY;
+}
+
 function axisMetaForDomain(domain) {
-  if (domain === "housing") {
-    return {
-      x: { label: "Rank confidence", low: "Lower", high: "Higher" },
-      y: { label: "Fit", low: "Worse", high: "Better" },
-    };
-  }
   return {
-    x: { label: "Rank confidence", low: "Lower", high: "Higher" },
-    y: { label: "Fit", low: "Worse", high: "Better" },
+    x: { label: "Relevance score", low: "Lower", high: "Higher" },
+    y: { label: "AI Rank", low: "Worse", high: "Better" },
   };
 }
 
@@ -154,40 +168,51 @@ function boardColumnsFor(nodesLength, viewportWidth) {
   if (nodesLength <= 1) {
     return 1;
   }
-
-  const safeViewport = Math.max(360, viewportWidth || BOARD_WIDTH);
-  const availableWidth = Math.max(safeViewport - 96, NODE_WIDTH + BOARD_PADDING * 2);
-  const columnsThatFit = Math.max(
-    1,
-    Math.floor((availableWidth - BOARD_PADDING * 2 + NODE_GAP) / (NODE_WIDTH + NODE_GAP)),
-  );
-
-  return Math.min(nodesLength, BOARD_MAX_COLUMNS, columnsThatFit);
+  // Allow the board to grow wide instead of clamping it to the viewport width.
+  // For small node counts, don't force too many columns.
+  const ideal = Math.ceil(Math.sqrt(nodesLength));
+  return Math.max(2, ideal);
 }
 
-function boardWidthFor(columns, viewportWidth) {
-  const naturalWidth = BOARD_PADDING * 2 + columns * NODE_WIDTH + Math.max(0, columns - 1) * NODE_GAP;
-  if (columns === 1) {
-    return Math.min(Math.max(320, viewportWidth - 32), naturalWidth);
-  }
-  return naturalWidth;
+function boardWidthFor(columns, viewportWidth, hasDetail) {
+  const sidebarWidth = hasDetail ? 360 : 0;
+  // Account for shell and stage padding
+  const totalShellPadding = 56; // 28px * 2
+  const totalStagePadding = 44; // 22px * 2
+  const availableWidth = viewportWidth - sidebarWidth - totalShellPadding - totalStagePadding;
+
+  const naturalWidth =
+    BOARD_PADDING * 2 +
+    columns * NODE_WIDTH +
+    Math.max(0, columns - 1) * NODE_GAP;
+
+  return Math.max(availableWidth, naturalWidth, 1000);
 }
 
 function boardHeightFor(nodesLength, columns) {
   const rows = Math.max(1, Math.ceil(nodesLength / columns));
-  return Math.max(BOARD_MIN_HEIGHT, BOARD_PADDING * 2 + rows * NODE_HEIGHT + Math.max(0, rows - 1) * NODE_GAP);
+  const scatterHeight =
+    BOARD_PADDING * 2 + rows * (NODE_HEIGHT + NODE_GAP * 1.5);
+  return Math.max(BOARD_MIN_HEIGHT, scatterHeight);
 }
 
-function computeLayout(nodes, domain, viewportWidth, boardWidth, boardHeight) {
+function computeLayout(nodes, viewportWidth, boardWidth, boardHeight) {
   const positions = {};
   if (!nodes.length) {
     return positions;
   }
 
   const rankedNodes = [...nodes];
-  const priceValues = rankedNodes.map((node) => metaNumber(node, "priceUsd")).filter((value) => value !== null);
-  const scoreValues = rankedNodes.map((node) => metaNumber(node, "combinedScore")).filter((value) => value !== null);
-  const aiRanks = rankedNodes.map((node) => metaNumber(node, "aiRank")).filter((value) => value !== null);
+  const priceValues = rankedNodes
+    .map((node) => metaNumber(node, "priceUsd"))
+    .filter((value) => value !== null);
+  const scoreValues = rankedNodes
+    .map((node) => metaNumber(node, "combinedScore"))
+    .filter((value) => value !== null);
+  const aiRanks = rankedNodes
+    .map((node) => metaNumber(node, "aiRank"))
+    .filter((value) => value !== null);
+
   const priceMin = priceValues.length ? Math.min(...priceValues) : 0;
   const priceMax = priceValues.length ? Math.max(...priceValues) : 0;
   const scoreMin = scoreValues.length ? Math.min(...scoreValues) : 0;
@@ -202,12 +227,25 @@ function computeLayout(nodes, domain, viewportWidth, boardWidth, boardHeight) {
     const rank = metaNumber(node, "aiRank") ?? rankMax;
     const combinedScore = metaNumber(node, "combinedScore") ?? scoreMin;
     const price = metaNumber(node, "priceUsd");
-    const rankNormalized = rankMax > rankMin ? 1 - (rank - rankMin) / (rankMax - rankMin) : 1;
-    const fitNormalized = scoreMax > scoreMin ? (combinedScore - scoreMin) / (scoreMax - scoreMin) : 0.65;
-    const pricePenalty = price !== null && priceMax > priceMin ? (price - priceMin) / (priceMax - priceMin) : 0.2;
-    const xNormalized = Math.max(0, Math.min(1, rankNormalized * 0.8 + (1 - pricePenalty) * 0.2));
+    const rankNormalized =
+      rankMax > rankMin ? 1 - (rank - rankMin) / (rankMax - rankMin) : 1;
+    const fitNormalized =
+      scoreMax > scoreMin
+        ? (combinedScore - scoreMin) / (scoreMax - scoreMin)
+        : 0.65;
+    const pricePenalty =
+      price !== null && priceMax > priceMin
+        ? (price - priceMin) / (priceMax - priceMin)
+        : 0.2;
+    const xNormalized = Math.max(
+      0,
+      Math.min(1, rankNormalized * 0.8 + (1 - pricePenalty) * 0.2),
+    );
     const yNormalizedBase = Math.max(0, Math.min(1, fitNormalized));
-    const yNormalized = isViolated(node) ? Math.min(0.18, yNormalizedBase * 0.35) : Math.max(0.12, yNormalizedBase);
+    const yNormalized = isViolated(node)
+      ? Math.min(0.18, yNormalizedBase * 0.35)
+      : Math.max(0.12, yNormalizedBase);
+
     targetPositions[node.id] = {
       x: BOARD_PADDING + xNormalized * xRange,
       y: BOARD_PADDING + (1 - yNormalized) * yRange,
@@ -222,14 +260,18 @@ function computeLayout(nodes, domain, viewportWidth, boardWidth, boardHeight) {
       if (leftScore !== rightScore) {
         return rightScore - leftScore;
       }
-      return (metaNumber(left, "aiRank") ?? 999) - (metaNumber(right, "aiRank") ?? 999);
+      return (
+        (metaNumber(left, "aiRank") ?? 999) - (metaNumber(right, "aiRank") ?? 999)
+      );
     })
     .map((node) => node.id);
 
-  const minDx = NODE_WIDTH + 16;
-  const minDy = NODE_HEIGHT + 16;
+  const minDx = NODE_WIDTH + NODE_GAP;
+  const minDy = NODE_HEIGHT + NODE_GAP;
 
-  for (let iteration = 0; iteration < 80; iteration += 1) {
+  for (let iteration = 0; iteration < 200; iteration += 1) {
+    let anyOverlap = false;
+
     for (let index = 0; index < orderedIds.length; index += 1) {
       const leftId = orderedIds[index];
       const leftPosition = positions[leftId];
@@ -237,7 +279,11 @@ function computeLayout(nodes, domain, viewportWidth, boardWidth, boardHeight) {
         continue;
       }
 
-      for (let nextIndex = index + 1; nextIndex < orderedIds.length; nextIndex += 1) {
+      for (
+        let nextIndex = index + 1;
+        nextIndex < orderedIds.length;
+        nextIndex += 1
+      ) {
         const rightId = orderedIds[nextIndex];
         const rightPosition = positions[rightId];
         if (!rightPosition) {
@@ -250,12 +296,25 @@ function computeLayout(nodes, domain, viewportWidth, boardWidth, boardHeight) {
         const overlapY = minDy - Math.abs(dy);
 
         if (overlapX > 0 && overlapY > 0) {
-          const pushX = overlapX * 0.16 * (dx >= 0 ? 1 : -1);
-          const pushY = overlapY * 0.16 * (dy >= 0 ? 1 : -1);
-          leftPosition.x = Math.max(BOARD_PADDING, Math.min(BOARD_PADDING + xRange, leftPosition.x - pushX));
-          rightPosition.x = Math.max(BOARD_PADDING, Math.min(BOARD_PADDING + xRange, rightPosition.x + pushX));
-          leftPosition.y = Math.max(BOARD_PADDING, Math.min(BOARD_PADDING + yRange, leftPosition.y - pushY));
-          rightPosition.y = Math.max(BOARD_PADDING, Math.min(BOARD_PADDING + yRange, rightPosition.y + pushY));
+          anyOverlap = true;
+          const pushX = overlapX * 0.52 * (dx >= 0 ? 1 : -1);
+          const pushY = overlapY * 0.52 * (dy >= 0 ? 1 : -1);
+          leftPosition.x = Math.max(
+            BOARD_PADDING,
+            Math.min(BOARD_PADDING + xRange, leftPosition.x - pushX),
+          );
+          rightPosition.x = Math.max(
+            BOARD_PADDING,
+            Math.min(BOARD_PADDING + xRange, rightPosition.x + pushX),
+          );
+          leftPosition.y = Math.max(
+            BOARD_PADDING,
+            Math.min(BOARD_PADDING + yRange, leftPosition.y - pushY),
+          );
+          rightPosition.y = Math.max(
+            BOARD_PADDING,
+            Math.min(BOARD_PADDING + yRange, rightPosition.y + pushY),
+          );
         }
       }
     }
@@ -263,39 +322,61 @@ function computeLayout(nodes, domain, viewportWidth, boardWidth, boardHeight) {
     orderedIds.forEach((id) => {
       positions[id].x = Math.max(
         BOARD_PADDING,
-        Math.min(BOARD_PADDING + xRange, positions[id].x * 0.9 + targetPositions[id].x * 0.1),
+        Math.min(
+          BOARD_PADDING + xRange,
+          positions[id].x * 0.92 + targetPositions[id].x * 0.08,
+        ),
       );
       positions[id].y = Math.max(
         BOARD_PADDING,
-        Math.min(BOARD_PADDING + yRange, positions[id].y * 0.9 + targetPositions[id].y * 0.1),
+        Math.min(
+          BOARD_PADDING + yRange,
+          positions[id].y * 0.92 + targetPositions[id].y * 0.08,
+        ),
       );
     });
+
+    if (!anyOverlap) {
+      break;
+    }
   }
 
   return positions;
 }
 
-async function fetchSession(query, constraint) {
+async function fetchSession(query, constraint, previousSession) {
   const statsResponse = await fetch(`${API_BASE}/api/v1/extension/history/stats`);
   if (!statsResponse.ok) {
-    throw new Error(`Failed to load extension history stats: ${statsResponse.status}`);
+    throw new Error(
+      `Failed to load extension history stats: ${statsResponse.status}`,
+    );
   }
 
   const stats = await statsResponse.json();
   if (Number(stats.count ?? 0) <= 0) {
-    throw new Error("No synced extension snapshots found. Open the extension, capture a page, and click Graph again.");
+    throw new Error(
+      "No synced extension snapshots found. Open the extension, capture a page, and click Graph again.",
+    );
   }
 
-  const response = await fetch(`${API_BASE}/api/v1/session/synthesize-from-extension-history`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      user_prompt: query,
-      user_constraint: constraint || null,
-      firecrawl_query_budget: 4,
-      max_tabs: 20,
-    }),
-  });
+  const bodyPayload = {
+    user_prompt: query,
+    user_constraint: constraint || null,
+    firecrawl_query_budget: 4,
+    max_tabs: 20,
+  };
+  if (previousSession && previousSession.graph) {
+    bodyPayload.previous_graph = previousSession.graph;
+  }
+
+  const response = await fetch(
+    `${API_BASE}/api/v1/session/synthesize-from-extension-history`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(bodyPayload),
+    },
+  );
 
   if (!response.ok) {
     const message = await response.text();
@@ -323,63 +404,74 @@ async function applyConstraintToSession(session, constraint) {
   return response.json();
 }
 
+function LoadingOverlay({ message }) {
+  return (
+    <motion.div
+      className="loading-overlay"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+    >
+      <div className="loading-content">
+        <Loader2 size={48} strokeWidth={1.5} className="spin-icon" />
+        <h2>{message || "Synthesizing research..."}</h2>
+        <p>Aggregating signals from your captured tabs and discovered context.</p>
+        <div className="loading-progress-bar">
+          <motion.div
+            className="loading-progress-fill"
+            initial={{ width: "0%" }}
+            animate={{ width: "95%" }}
+            transition={{ duration: 15, ease: "linear" }}
+          />
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
 function BoardCard({ node, active, onSelect }) {
   const color = TYPE_CLR[normalizeType(node.type)] || TYPE_CLR.item;
-  const price = metaNumber(node, "priceUsd");
-  const noise = metaNumber(node, "noiseLevelDb");
-  const cooling = metaText(node, "coolingPerformance");
   const violated = isViolated(node);
+  const metrics = node.metadata?.metrics?.slice(0, 3) || [];
 
   return (
     <motion.button
       type="button"
-      initial={{ opacity: 0, scale: 0.88 }}
-      animate={{ opacity: violated ? 0.76 : 1, scale: 1 }}
-      transition={{ type: "spring", stiffness: 240, damping: 24 }}
+      className={`board-node-card${active ? " is-active" : ""}${
+        violated ? " is-flagged" : ""
+      }`}
+      initial={{ opacity: 0, scale: 0.92, y: 18 }}
+      animate={{ opacity: violated ? 0.88 : 1, scale: 1, y: 0 }}
+      transition={{ type: "spring", stiffness: 220, damping: 26 }}
       onClick={() => onSelect((prev) => (prev === node.id ? null : node.id))}
-      style={{
-        width: NODE_WIDTH,
-        minHeight: NODE_HEIGHT,
-        padding: 14,
-        borderRadius: 16,
-        textAlign: "left",
-        border: `1px solid ${violated ? "#ef4444" : active ? color : "rgba(255,255,255,0.08)"}`,
-        background: "rgba(14,14,14,0.94)",
-        backdropFilter: "blur(8px)",
-        cursor: "pointer",
-        boxShadow: violated ? "0 0 18px rgba(239,68,68,0.16)" : active ? `0 0 18px ${color}22` : "0 8px 26px rgba(0,0,0,0.28)",
-        transition: "border-color 0.2s, box-shadow 0.2s",
-        color: "#e5e7eb",
-      }}
+      style={{ "--accent": color, width: NODE_WIDTH, minHeight: NODE_HEIGHT }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
-        <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color }}>
-          {node.source}
-        </span>
-        <span style={{ width: 6, height: 6, borderRadius: "50%", background: STAT_CLR[node.status] || "#6b7280" }} />
-        <span style={{ marginLeft: "auto", fontSize: 10, color: violated ? "#fca5a5" : "#81838d" }}>
-          {violated ? "flagged" : "fit"}
-        </span>
+      <div className="board-node-top">
+        <span className="board-node-source">{node.source}</span>
+        <span
+          className="board-node-dot"
+          style={{ background: STAT_CLR[node.status] || "#8f8779" }}
+        />
+        <span className="board-node-state">{violated ? "flagged" : "fit"}</span>
       </div>
-      <div style={{ fontWeight: 600, fontSize: 15, lineHeight: 1.3 }}>{node.title}</div>
-      <div style={{ fontSize: 12, color: "#8f96a3", marginTop: 4, minHeight: 32 }}>{node.subtitle}</div>
+
+      <div className="board-node-title">{node.title}</div>
+      <div className="board-node-subtitle">{node.subtitle}</div>
+
       {violated && node.metadata?.constraintReason ? (
-        <div style={{ marginTop: 8, fontSize: 11, color: "#fca5a5" }}>{node.metadata.constraintReason}</div>
+        <div className="board-node-warning">{node.metadata.constraintReason}</div>
       ) : null}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginTop: 12 }}>
-        <div>
-          <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase" }}>Price</div>
-          <div style={{ fontSize: 13 }}>{price ? `$${price.toFixed(0)}` : "Unknown"}</div>
+
+      {metrics.length > 0 && (
+        <div className="board-node-metrics">
+          {metrics.map((m, i) => (
+            <div key={i} className="metric-pair">
+              <div className="metric-label">{m.label}</div>
+              <div className="metric-value">{m.value}</div>
+            </div>
+          ))}
         </div>
-        <div>
-          <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase" }}>Noise</div>
-          <div style={{ fontSize: 13 }}>{noise ? `${noise.toFixed(0)} dB` : metaText(node, "noiseDisplay")}</div>
-        </div>
-        <div>
-          <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase" }}>Cooling</div>
-          <div style={{ fontSize: 13 }}>{cooling}</div>
-        </div>
-      </div>
+      )}
     </motion.button>
   );
 }
@@ -387,14 +479,15 @@ function BoardCard({ node, active, onSelect }) {
 function DigestCard({ entry, node, active, onSelect, onSwap, index }) {
   const color = TYPE_CLR[normalizeType(node?.type)] || TYPE_CLR.item;
   const violated = isViolated(node);
-  const price = metaNumber(node, "priceUsd");
-  const noise = metaNumber(node, "noiseLevelDb");
-  const cooling = metaText(node, "coolingPerformance");
   const aiRank = metaNumber(node, "aiRank");
+  const metrics = node?.metadata?.metrics?.slice(0, 3) || [];
 
   return (
     <motion.div
       layout
+      className={`digest-card${active ? " is-active" : ""}${
+        violated ? " is-flagged" : ""
+      }`}
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: index * 0.03 }}
@@ -414,48 +507,72 @@ function DigestCard({ entry, node, active, onSelect, onSwap, index }) {
       }}
       onClick={() => onSelect((prev) => (prev === entry.node_id ? null : entry.node_id))}
       style={{
-        ...card,
-        padding: 14,
-        cursor: "grab",
-        borderColor: violated ? "#ef4444" : active ? color : undefined,
-        opacity: entry.relevance < 0.4 ? 0.6 : 1,
-        boxShadow: violated ? "0 0 0 1px rgba(239,68,68,0.15) inset" : "none",
+        "--accent": color,
+        opacity: entry.relevance < 0.4 ? 0.72 : 1,
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
-        <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color }}>{node?.source || "Captured"}</span>
-        <span style={{ fontSize: 10, color: violated ? "#fca5a5" : STAT_CLR[node?.status], textTransform: "capitalize" }}>
+      <div className="digest-topline">
+        <span className="source-pill" style={{ "--accent": color }}>
+          {node?.source || "Captured"}
+        </span>
+        <span className={`status-pill${violated ? " is-flagged" : ""}`}>
           {violated ? "flagged" : node?.status || "ready"}
         </span>
-        <span style={{ marginLeft: "auto", fontSize: 10, color: "#6b7280" }}>{aiRank ? `AI #${aiRank}` : `${Math.round(entry.relevance * 100)}%`}</span>
+        <span className="relevance-pill">
+          {aiRank ? `AI #${aiRank}` : `${Math.round(entry.relevance * 100)}%`}
+        </span>
       </div>
-      <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>{node?.title || entry.node_id}</div>
-      <div style={{ fontSize: 12, color: "#9ca3af", lineHeight: 1.5, marginBottom: 10 }}>{entry.summary}</div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginBottom: 10 }}>
-        <div>
-          <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase" }}>Price</div>
-          <div style={{ fontSize: 13 }}>{price ? `$${price.toFixed(0)}` : "Unknown"}</div>
+
+      <div className="digest-title">{node?.title || entry.node_id}</div>
+      <div className="digest-summary">{entry.summary}</div>
+
+      {metrics.length > 0 && (
+        <div className="digest-metrics">
+          {metrics.map((m, i) => (
+            <div key={i} className="metric-pair">
+              <div className="metric-label">{m.label}</div>
+              <div className="metric-value">{m.value}</div>
+            </div>
+          ))}
         </div>
-        <div>
-          <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase" }}>Noise</div>
-          <div style={{ fontSize: 13 }}>{noise ? `${noise.toFixed(0)} dB` : metaText(node, "noiseDisplay")}</div>
-        </div>
-        <div>
-          <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase" }}>Cooling</div>
-          <div style={{ fontSize: 13 }}>{cooling}</div>
-        </div>
-      </div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+      )}
+
+      <div className="digest-signal-row">
         {violated && node?.metadata?.constraintReason ? (
-          <span style={{ ...pill, fontSize: 11, background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.22)", color: "#fca5a5" }}>
+          <span
+            style={{
+              ...pillStyle,
+              color: "#e1b3a8",
+              background: "rgba(201, 134, 115, 0.12)",
+              border: "1px solid rgba(201, 134, 115, 0.24)",
+              maxWidth: 200,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+            title={node.metadata.constraintReason}
+          >
             {node.metadata.constraintReason}
           </span>
         ) : null}
-        {entry.signals.map((signal) => (
-          <span key={`${entry.node_id}-${signal.label}`} style={{ ...pill, fontSize: 11 }}>
-            {signal.label}
+        {entry.signals.slice(0, 2).map((signal) => (
+          <span
+            key={`${entry.node_id}-${signal.label}`}
+            style={{
+              ...pillStyle,
+              maxWidth: 160,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+            title={signal.label}
+          >
+            {signal.label.length > 28 ? `${signal.label.slice(0, 26)}…` : signal.label}
           </span>
         ))}
+        {entry.signals.length > 2 ? (
+          <span style={{ ...pillStyle, color: "#8c8478" }}>+{entry.signals.length - 2}</span>
+        ) : null}
       </div>
     </motion.div>
   );
@@ -465,7 +582,7 @@ export default function App() {
   const [selected, setSelected] = useState(null);
   const [query, setQuery] = useState(DEFAULT_QUERY);
   const [constraint, setConstraint] = useState("");
-  const [view, setView] = useState("all");
+  const [view, setView] = useState("board");
   const [sortMode, setSortMode] = useState("ai");
   const [showDiscovered, setShowDiscovered] = useState(true);
   const [session, setSession] = useState(null);
@@ -473,11 +590,11 @@ export default function App() {
   const [digestOrder, setDigestOrder] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
-  const [viewportWidth, setViewportWidth] = useState(() => (typeof window === "undefined" ? 1280 : window.innerWidth));
+  const [viewportWidth, setViewportWidth] = useState(() =>
+    typeof window === "undefined" ? 1280 : window.innerWidth,
+  );
 
   const data = session;
-  const show = (value) => view === "all" || view === value;
-
   const nodeMap = useMemo(
     () => Object.fromEntries((data?.graph?.nodes || []).map((node) => [node.id, node])),
     [data],
@@ -492,6 +609,7 @@ export default function App() {
     }
     return allNodes.filter((node) => !isDiscoveredNode(node));
   }, [allNodes, showDiscovered]);
+
   const boardNodes = useMemo(
     () =>
       visibleNodes
@@ -500,32 +618,59 @@ export default function App() {
           if (isViolated(left) !== isViolated(right)) {
             return Number(isViolated(left)) - Number(isViolated(right));
           }
-          return (metaNumber(left, "aiRank") ?? 999) - (metaNumber(right, "aiRank") ?? 999);
+          return (
+            (metaNumber(left, "aiRank") ?? 999) -
+            (metaNumber(right, "aiRank") ?? 999)
+          );
         }),
     [visibleNodes],
   );
+
   const reviewNodes = useMemo(
     () =>
       visibleNodes
         .filter((node) => isExternalReviewNode(node))
-        .sort((left, right) => (metaNumber(left, "aiRank") ?? 999) - (metaNumber(right, "aiRank") ?? 999)),
+        .sort(
+          (left, right) =>
+            (metaNumber(left, "aiRank") ?? 999) -
+            (metaNumber(right, "aiRank") ?? 999),
+        ),
     [visibleNodes],
   );
 
-  const boardNodeIds = useMemo(() => new Set(boardNodes.map((node) => node.id)), [boardNodes]);
-  const visibleNodeIds = useMemo(() => new Set(visibleNodes.map((node) => node.id)), [visibleNodes]);
-  const boardColumns = useMemo(() => boardColumnsFor(boardNodes.length, viewportWidth), [boardNodes.length, viewportWidth]);
-  const boardWidth = useMemo(() => boardWidthFor(boardColumns, viewportWidth), [boardColumns, viewportWidth]);
-  const boardHeight = useMemo(() => boardHeightFor(boardNodes.length, boardColumns), [boardColumns, boardNodes.length]);
+  const boardNodeIds = useMemo(
+    () => new Set(boardNodes.map((node) => node.id)),
+    [boardNodes],
+  );
+  const visibleNodeIds = useMemo(
+    () => new Set(visibleNodes.map((node) => node.id)),
+    [visibleNodes],
+  );
+
+  const boardColumns = useMemo(
+    () => boardColumnsFor(boardNodes.length, viewportWidth),
+    [boardNodes.length, viewportWidth],
+  );
+  const boardWidth = useMemo(
+    () => boardWidthFor(boardColumns, viewportWidth, !!selectedNode),
+    [boardColumns, viewportWidth, !!selectedNode],
+  );
+  const boardHeight = useMemo(
+    () => boardHeightFor(boardNodes.length, boardColumns),
+    [boardColumns, boardNodes.length],
+  );
 
   const visibleEdges = useMemo(
-    () => (data?.graph?.edges || []).filter((edge) => boardNodeIds.has(edge.from) && boardNodeIds.has(edge.to)),
+    () =>
+      (data?.graph?.edges || []).filter(
+        (edge) => boardNodeIds.has(edge.from) && boardNodeIds.has(edge.to),
+      ),
     [boardNodeIds, data],
   );
 
   useEffect(() => {
-    setPositions(computeLayout(boardNodes, data?.domain, viewportWidth, boardWidth, boardHeight));
-  }, [boardNodes, data, viewportWidth, boardWidth, boardHeight]);
+    setPositions(computeLayout(boardNodes, viewportWidth, boardWidth, boardHeight));
+  }, [boardNodes, viewportWidth, boardWidth, boardHeight]);
 
   useEffect(() => {
     const handleResize = () => setViewportWidth(window.innerWidth);
@@ -538,26 +683,37 @@ export default function App() {
     const resolvedConstraint = nextConstraint.trim();
     setIsLoading(true);
     setError("");
+
     try {
       const appliedConstraint =
         session?.digest?.theme_signals
-          ?.find((signal) => typeof signal === "string" && signal.startsWith("constraint:"))
+          ?.find(
+            (signal) =>
+              typeof signal === "string" && signal.startsWith("constraint:"),
+          )
           ?.replace(/^constraint:\s*/i, "")
           ?.trim() || "";
+
       const shouldReuseSession =
         session &&
         typeof session.query === "string" &&
         session.query.trim().toLowerCase() === resolvedQuery.toLowerCase() &&
         appliedConstraint !== resolvedConstraint;
+
       const payload = shouldReuseSession
         ? await applyConstraintToSession(session, resolvedConstraint)
-        : await fetchSession(resolvedQuery, resolvedConstraint);
+        : await fetchSession(resolvedQuery, resolvedConstraint, session);
+
       setSession(payload);
       setQuery(payload.query || resolvedQuery);
       setSelected(null);
       setDigestOrder([]);
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Failed to load session.");
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Failed to load session.",
+      );
     } finally {
       setIsLoading(false);
     }
@@ -573,12 +729,16 @@ export default function App() {
   }, []);
 
   const baseDigestEntries = useMemo(() => {
-    const entries = [...(data?.digest?.entries || [])].filter((entry) => visibleNodeIds.has(entry.node_id));
+    const entries = [...(data?.digest?.entries || [])].filter((entry) =>
+      visibleNodeIds.has(entry.node_id),
+    );
+
     return entries.sort((left, right) => {
       const leftNode = nodeMap[left.node_id];
       const rightNode = nodeMap[right.node_id];
       const leftValue = getNodeSortValue(leftNode, sortMode);
       const rightValue = getNodeSortValue(rightNode, sortMode);
+
       if (leftValue !== rightValue) {
         return leftValue - rightValue;
       }
@@ -617,7 +777,9 @@ export default function App() {
     if (!digestOrder.length) {
       return baseDigestEntries;
     }
-    const entryMap = new Map(baseDigestEntries.map((entry) => [entry.node_id, entry]));
+    const entryMap = new Map(
+      baseDigestEntries.map((entry) => [entry.node_id, entry]),
+    );
     return digestOrder.map((id) => entryMap.get(id)).filter(Boolean);
   }, [baseDigestEntries, digestOrder]);
 
@@ -625,520 +787,530 @@ export default function App() {
     if (!sourceId || !targetId || sourceId === targetId) {
       return;
     }
+
     setDigestOrder((current) => {
-      const base = current.length ? [...current] : baseDigestEntries.map((entry) => entry.node_id);
+      const base = current.length
+        ? [...current]
+        : baseDigestEntries.map((entry) => entry.node_id);
       const sourceIndex = base.indexOf(sourceId);
       const targetIndex = base.indexOf(targetId);
+
       if (sourceIndex === -1 || targetIndex === -1) {
         return base;
       }
-      [base[sourceIndex], base[targetIndex]] = [base[targetIndex], base[sourceIndex]];
+
+      [base[sourceIndex], base[targetIndex]] = [
+        base[targetIndex],
+        base[sourceIndex],
+      ];
       return base;
     });
   }
 
-  return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background: "#0a0a0a",
-        color: "#e5e7eb",
-        fontFamily: "'Inter', system-ui, sans-serif",
-        position: "relative",
-        overflow: "hidden",
-      }}
-    >
-      <div style={{ position: "absolute", top: "-20%", left: "-10%", width: "50%", height: "50%", background: "rgba(59,130,246,0.06)", filter: "blur(140px)", borderRadius: "50%", pointerEvents: "none" }} />
-      <div style={{ position: "absolute", bottom: "-20%", right: "-10%", width: "50%", height: "50%", background: "rgba(168,85,247,0.06)", filter: "blur(140px)", borderRadius: "50%", pointerEvents: "none" }} />
+  const compareColumns = visibleMatrixRows.map((row) => ({
+    row,
+    node: nodeMap[row.node_id],
+  }));
+  const leadBoardNode = boardNodes[0] || null;
+  const flaggedBoardCount = boardNodes.filter((node) => isViolated(node)).length;
+  const discoveredBoardCount = boardNodes.filter((node) => isDiscoveredNode(node)).length;
 
-      <header
-        style={{
-          position: "sticky",
-          top: 0,
-          zIndex: 50,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "14px 24px",
-          borderBottom: "1px solid rgba(255,255,255,0.06)",
-          background: "rgba(0,0,0,0.6)",
-          backdropFilter: "blur(12px)",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ width: 30, height: 30, borderRadius: 8, background: "linear-gradient(135deg,#3b82f6,#a855f7)", display: "grid", placeItems: "center", fontWeight: 700, fontSize: 13, color: "#fff" }}>
-            S
+  return (
+    <div className="synapse-app">
+      <div className="app-grid-overlay" />
+
+      <header className="workspace-header">
+        <div className="brand-cluster">
+          <div className="brand-mark">S</div>
+          <div>
+            <p className="workspace-eyebrow">Workspace</p>
+            <h1 className="workspace-title">Context canvas</h1>
           </div>
-          <span style={{ fontWeight: 600, fontSize: 17, letterSpacing: "-0.02em" }}>Synapse</span>
-          <span style={{ fontSize: 12, color: "#6b7280", marginLeft: 8 }}>{data?.domain ? `· ${data.domain}` : "· live session"}</span>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ width: 7, height: 7, borderRadius: "50%", background: isLoading ? "#eab308" : "#22c55e" }} />
-          <span style={{ fontSize: 12, color: "#6b7280" }}>
+
+        <div className="header-status">
+          <div className={`live-pill${isLoading ? " is-loading" : ""}`}>
+            <span className="live-dot" />
             {isLoading
-              ? "loading"
+              ? "Refreshing session"
               : data?.digest?.stats
-                ? `${data.digest.stats.ready} ready${data.digest.stats.pending ? ` · ${data.digest.stats.pending} flagged` : ""}`
-                : "awaiting data"}
-          </span>
+                ? `${data.digest.stats.ready || 0} ready`
+                : "Awaiting capture"}
+          </div>
+          <div className="header-domain">{data?.domain || "Live session"}</div>
         </div>
       </header>
 
-      <div style={{ padding: "18px 24px", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+      <section className="control-shell">
         <form
+          className="control-form"
           onSubmit={(event) => {
             event.preventDefault();
             runQuery(query, constraint);
           }}
-          style={{ maxWidth: 1080, display: "grid", gridTemplateColumns: "minmax(260px,1fr) auto", gap: 10 }}
         >
-          <input
-            value={constraint}
-            onChange={(event) => setConstraint(event.target.value)}
-            placeholder="Constraint, e.g. only under $50"
-            style={{
-              width: "100%",
-              padding: "12px 16px",
-              borderRadius: 12,
-              border: "1px solid rgba(255,255,255,0.08)",
-              background: "rgba(255,255,255,0.04)",
-              color: "#e5e7eb",
-              fontSize: 14,
-              fontFamily: "inherit",
-              outline: "none",
-            }}
-          />
-          <button
-            type="submit"
-            disabled={isLoading}
-            style={{
-              padding: "12px 18px",
-              borderRadius: 12,
-              border: "1px solid rgba(59,130,246,0.5)",
-              background: isLoading ? "rgba(59,130,246,0.25)" : "linear-gradient(135deg,#3b82f6,#7c3aed)",
-              color: "#fff",
-              cursor: isLoading ? "default" : "pointer",
-              fontWeight: 600,
-            }}
-          >
-            {isLoading ? "Loading..." : "Run"}
+          <label className="input-shell prompt-shell">
+            <Search size={16} strokeWidth={2.1} />
+            <div className="input-copy">
+              <span className="input-label">Prompt</span>
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="What should Synapse synthesize?"
+              />
+            </div>
+          </label>
+
+          <label className="input-shell constraint-shell">
+            <SlidersHorizontal size={16} strokeWidth={2.1} />
+            <div className="input-copy">
+              <span className="input-label">Constraint</span>
+              <input
+                value={constraint}
+                onChange={(event) => setConstraint(event.target.value)}
+                placeholder="Optional filter, threshold, or exclusion"
+              />
+            </div>
+          </label>
+
+          <button className="run-button" type="submit" disabled={isLoading}>
+            {isLoading ? (
+              <Loader2 size={16} strokeWidth={2.1} className="spin-icon" />
+            ) : (
+              <Sparkles size={16} strokeWidth={2.1} />
+            )}
+            <span>{isLoading ? "Running" : "Run synthesis"}</span>
           </button>
         </form>
 
-        {(query || constraint) ? (
-          <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {query ? (
-              <span style={pill}>
-                {query}
-              </span>
-            ) : null}
-            <span style={{ ...pill, background: "rgba(59,130,246,0.12)", border: "1px solid rgba(59,130,246,0.22)" }}>
-              Constraint: {constraint || "None"}
-            </span>
-          </div>
-        ) : null}
-
-        {error ? (
-          <div style={{ marginTop: 10, maxWidth: 1080, padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(239,68,68,0.25)", background: "rgba(239,68,68,0.08)", color: "#fca5a5", fontSize: 13 }}>
-            {error}
-          </div>
-        ) : null}
-
-        {data?.digest?.theme_signals?.length ? (
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-            {data.digest.theme_signals.map((signal) => (
-              <span key={signal} style={pill}>
-                {signal}
-              </span>
-            ))}
-            <div style={{ marginLeft: "auto", display: "flex", background: "rgba(255,255,255,0.04)", borderRadius: 10, padding: 3, border: "1px solid rgba(255,255,255,0.06)" }}>
-              {VIEWS.map((value) => (
-                <button
-                  key={value}
-                  onClick={() => setView(value)}
-                  style={{
-                    padding: "6px 16px",
-                    borderRadius: 8,
-                    border: "none",
-                    cursor: "pointer",
-                    fontSize: 12,
-                    fontWeight: 500,
-                    fontFamily: "inherit",
-                    textTransform: "capitalize",
-                    background: view === value ? "linear-gradient(135deg,#3b82f6,#7c3aed)" : "transparent",
-                    color: view === value ? "#fff" : "#6b7280",
-                  }}
-                >
-                  {value}
-                </button>
-              ))}
-              <div style={{ width: 1, background: "rgba(255,255,255,0.1)", margin: "2px 4px" }} />
-              <button
-                onClick={() => setView("all")}
-                style={{
-                  padding: "6px 16px",
-                  borderRadius: 8,
-                  border: "none",
-                  cursor: "pointer",
-                  fontSize: 12,
-                  fontWeight: 500,
-                  fontFamily: "inherit",
-                  background: view === "all" ? "linear-gradient(135deg,#3b82f6,#7c3aed)" : "transparent",
-                  color: view === "all" ? "#fff" : "#6b7280",
-                }}
-              >
-                All
-              </button>
-              <button
-                onClick={() => setShowDiscovered((current) => !current)}
-                title={showDiscovered ? "Showing captured and AI-discovered nodes" : "Showing captured nodes only"}
-                style={{
-                  padding: "6px 16px",
-                  borderRadius: 8,
-                  border: "none",
-                  cursor: "pointer",
-                  fontSize: 12,
-                  fontWeight: 500,
-                  fontFamily: "inherit",
-                  background: showDiscovered ? "rgba(34,197,94,0.16)" : "transparent",
-                  color: showDiscovered ? "#86efac" : "#6b7280",
-                }}
-              >
-                AI {showDiscovered ? "on" : "off"}
-              </button>
-            </div>
-          </div>
-        ) : null}
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: selectedNode ? "1fr 340px" : "1fr", minHeight: "calc(100vh - 152px)" }}>
-        <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 20, overflow: "auto" }}>
-          {show("board") && (
-            <section>
-              <div style={{ ...label, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span>Board</span>
-                <span style={{ color: "#8d93a0", textTransform: "none", letterSpacing: 0 }}>
-                  Two axes are back: better fit rises upward, better rank moves right.
+        <div className="signal-row">
+          <div className="signal-group">
+            {data?.digest?.theme_signals
+              ?.filter((signal) => typeof signal === "string" && !signal.startsWith("constraint:"))
+              .slice(0, 3)
+              .map((signal) => (
+                <span key={signal} className="signal-chip soft">
+                  {signal}
                 </span>
+              ))}
+          </div>
+
+          <div className="stats-cluster">
+            <span className="stat-chip">{boardNodes.length} canvas</span>
+            <span className="stat-chip">{digestEntries.length} digest</span>
+            <button
+              type="button"
+              className={`stat-chip button-chip${showDiscovered ? " is-on" : ""}`}
+              onClick={() => setShowDiscovered((current) => !current)}
+              title={
+                showDiscovered
+                  ? "Showing captured and AI-discovered nodes"
+                  : "Showing captured nodes only"
+              }
+            >
+              AI {showDiscovered ? "on" : "off"}
+            </button>
+          </div>
+        </div>
+
+        {error ? <div className="error-banner">{error}</div> : null}
+      </section>
+
+      <div className={`workspace-shell${selectedNode ? " with-detail" : ""}`}>
+        <AnimatePresence>
+          {isLoading && (
+            <LoadingOverlay message={query ? `Researching "${query}"` : null} />
+          )}
+        </AnimatePresence>
+        <main className="stage-column">
+          <section className="stage-shell">
+            <div className="stage-header">
+              <div>
+                <p className="workspace-eyebrow">Workspace</p>
+                <h2 className="stage-title">Context canvas</h2>
+                <p className="stage-caption">
+                  {view === "compare" && data?.matrix
+                    ? data.matrix.rubric
+                    : "Captured pages, AI summaries, and comparisons stay in one view."}
+                </p>
               </div>
-              <div style={{ ...card, padding: 12, overflow: "auto", minHeight: 520 }}>
-                <div
-                  style={{
-                    position: "relative",
-                    width: boardWidth,
-                    height: boardHeight,
-                    margin: "0 auto",
-                    borderRadius: 18,
-                    overflow: "hidden",
-                    background:
-                      "linear-gradient(135deg, rgba(127,29,29,0.34) 0%, rgba(24,24,27,0.86) 40%, rgba(21,128,61,0.30) 100%)",
-                  }}
-                >
+
+              <div className="stage-toolbar">
+                <div className="view-tabs" role="tablist" aria-label="Workspace views">
+                  <button
+                    type="button"
+                    className={view === "board" ? "active" : ""}
+                    onClick={() => setView("board")}
+                  >
+                    <LayoutGrid size={16} strokeWidth={2.1} />
+                    <span>Board</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={view === "digest" ? "active" : ""}
+                    onClick={() => setView("digest")}
+                  >
+                    <BookText size={16} strokeWidth={2.1} />
+                    <span>Digest</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={view === "compare" ? "active" : ""}
+                    onClick={() => setView("compare")}
+                  >
+                    <Table2 size={16} strokeWidth={2.1} />
+                    <span>Compare</span>
+                  </button>
+                </div>
+
+                {view === "digest" ? (
+                  <label className="sort-control">
+                    <span>Sort</span>
+                    <select
+                      value={sortMode}
+                      onChange={(event) => setSortMode(event.target.value)}
+                    >
+                      {SORT_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+              </div>
+            </div>
+
+            {view === "board" ? (
+              <section className="view-shell">
+                <div className="board-topline">
+                  <span className="axis-pill">{boardNodes.length} nodes in context</span>
+                  <span className="axis-pill">{visibleEdges.length} relationships</span>
+                  <span className="axis-pill">{flaggedBoardCount} flagged</span>
+                  <span className="axis-pill">{discoveredBoardCount} discovered</span>
+                </div>
+
+                {leadBoardNode ? (
+                  <motion.div
+                    className="board-hero-card"
+                    initial={{ opacity: 0, y: 12 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: 0.04 }}
+                  >
+                    <div className="board-hero-copy">
+                      <div className="section-kicker">Current front-runner</div>
+                      <h3>{leadBoardNode.title}</h3>
+                      <p>{leadBoardNode.summary}</p>
+                    </div>
+                    <div className="board-hero-meta">
+                      <span className="signal-chip soft">
+                        {leadBoardNode.source}
+                      </span>
+                      <span className="signal-chip soft">
+                        {metaNumber(leadBoardNode, "aiRank")
+                          ? `AI #${metaNumber(leadBoardNode, "aiRank")}`
+                          : "Rank pending"}
+                      </span>
+                      <span className="signal-chip soft">
+                        {metaNumber(leadBoardNode, "priceUsd")
+                          ? `$${metaNumber(leadBoardNode, "priceUsd").toFixed(0)}`
+                          : metaText(leadBoardNode, "priceDisplay")}
+                      </span>
+                    </div>
+                  </motion.div>
+                ) : null}
+
+                <div className="board-frame">
                   <div
-                    style={{
-                      position: "absolute",
-                      inset: 0,
-                      background:
-                        "linear-gradient(135deg, rgba(248,113,113,0.08) 0%, rgba(248,113,113,0) 38%, rgba(74,222,128,0.14) 100%)",
-                      pointerEvents: "none",
-                    }}
-                  />
-                  <div style={{ position: "absolute", left: BOARD_PADDING, right: BOARD_PADDING, bottom: BOARD_PADDING - 10, height: 1, background: "rgba(255,255,255,0.14)" }} />
-                  <div style={{ position: "absolute", left: BOARD_PADDING - 10, top: BOARD_PADDING, bottom: BOARD_PADDING, width: 1, background: "rgba(255,255,255,0.14)" }} />
-                  <div style={{ position: "absolute", left: BOARD_PADDING, right: BOARD_PADDING, top: boardHeight / 2, height: 1, background: "rgba(255,255,255,0.05)" }} />
-                  <div style={{ position: "absolute", top: BOARD_PADDING, bottom: BOARD_PADDING, left: boardWidth / 2, width: 1, background: "rgba(255,255,255,0.05)" }} />
-                  <div style={{ position: "absolute", right: 20, top: 18, padding: "6px 10px", borderRadius: 999, border: "1px solid rgba(134,239,172,0.34)", background: "rgba(22,101,52,0.24)", fontSize: 11, fontWeight: 700, color: "#dcfce7", textTransform: "uppercase", letterSpacing: "0.08em" }}>
-                    Best
-                  </div>
-                  <div style={{ position: "absolute", left: 20, bottom: 18, padding: "6px 10px", borderRadius: 999, border: "1px solid rgba(248,113,113,0.24)", background: "rgba(127,29,29,0.18)", fontSize: 11, fontWeight: 700, color: "#fecaca", textTransform: "uppercase", letterSpacing: "0.08em" }}>
-                    Worst
-                  </div>
-                  <div style={{ position: "absolute", left: BOARD_PADDING, bottom: 10, fontSize: 11, color: "#9ca3af", fontWeight: 600 }}>
-                    {boardAxes.x.low}
-                  </div>
-                  <div style={{ position: "absolute", right: BOARD_PADDING, bottom: 10, fontSize: 11, color: "#d1d5db", fontWeight: 700 }}>
-                    {boardAxes.x.high}
-                  </div>
-                  <div style={{ position: "absolute", left: 10, bottom: BOARD_PADDING, fontSize: 11, color: "#9ca3af", fontWeight: 600, writingMode: "vertical-rl", textOrientation: "mixed" }}>
-                    {boardAxes.y.low}
-                  </div>
-                  <div style={{ position: "absolute", left: 10, top: BOARD_PADDING, fontSize: 11, color: "#d1d5db", fontWeight: 700, writingMode: "vertical-rl", textOrientation: "mixed" }}>
-                    {boardAxes.y.high}
-                  </div>
-                  <div style={{ position: "absolute", left: boardWidth / 2 - 42, bottom: 14, fontSize: 11, color: "#cbd5e1", fontWeight: 600, letterSpacing: "0.02em" }}>
-                    {boardAxes.x.label}
-                  </div>
-                  <div style={{ position: "absolute", left: 18, top: boardHeight / 2 - 10, fontSize: 11, color: "#cbd5e1", fontWeight: 600, letterSpacing: "0.02em", writingMode: "vertical-rl", textOrientation: "mixed" }}>
-                    {boardAxes.y.label}
-                  </div>
-                  <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}>
-                    {visibleEdges.map((edge) => {
-                      const from = positions[edge.from];
-                      const to = positions[edge.to];
-                      if (!from || !to) {
-                        return null;
-                      }
+                    className="board-canvas"
+                    style={{ width: boardWidth, height: boardHeight }}
+                  >
+                    <div className="board-zone board-zone-left" />
+                    <div className="board-zone board-zone-center" />
+                    <div className="board-zone board-zone-right" />
+                    <div className="board-zone-label board-zone-label-left">
+                      <span>Under review</span>
+                      <strong>Lower fit / unresolved</strong>
+                    </div>
+                    <div className="board-zone-label board-zone-label-center">
+                      <span>Viable cluster</span>
+                      <strong>Strong contenders</strong>
+                    </div>
+                    <div className="board-zone-label board-zone-label-right">
+                      <span>Priority zone</span>
+                      <strong>Highest signal</strong>
+                    </div>
+                    <div className="board-legend">
+                      <span>{boardAxes.y.label} rises upward</span>
+                      <span>{boardAxes.x.label} strengthens to the right</span>
+                    </div>
+
+                    <svg className="board-lines" aria-hidden="true">
+                      {visibleEdges.map((edge) => {
+                        const from = positions[edge.from];
+                        const to = positions[edge.to];
+                        if (!from || !to) {
+                          return null;
+                        }
+
+                        return (
+                          <line
+                            key={edge.id}
+                            x1={from.x + NODE_WIDTH / 2}
+                            y1={from.y + NODE_HEIGHT / 2}
+                            x2={to.x + NODE_WIDTH / 2}
+                            y2={to.y + NODE_HEIGHT / 2}
+                            stroke={EDGE_CLR[edge.label] || EDGE_CLR.related_to}
+                            strokeWidth={edge.label === "mentions" ? 1.6 : 1}
+                            strokeDasharray={edge.label === "enriches" ? "5 5" : "none"}
+                          />
+                        );
+                      })}
+                    </svg>
+
+                    {boardNodes.map((node) => {
+                      const position = positions[node.id] || { x: 80, y: 80 };
                       return (
-                        <line
-                          key={edge.id}
-                          x1={from.x + NODE_WIDTH / 2}
-                          y1={from.y + NODE_HEIGHT / 2}
-                          x2={to.x + NODE_WIDTH / 2}
-                          y2={to.y + NODE_HEIGHT / 2}
-                          stroke={EDGE_CLR[edge.label] || EDGE_CLR.related_to}
-                          strokeWidth={edge.label === "mentions" ? 1.5 : 1}
-                          strokeDasharray={edge.label === "enriches" ? "4 4" : "none"}
-                        />
+                        <div
+                          key={node.id}
+                          className="board-node-anchor"
+                          style={{ left: position.x, top: position.y }}
+                        >
+                          <div
+                            className={`board-node-halo${
+                              selected === node.id ? " is-active" : ""
+                            }`}
+                            style={{
+                              "--accent":
+                                TYPE_CLR[normalizeType(node.type)] || TYPE_CLR.item,
+                            }}
+                          />
+                          <BoardCard
+                            node={node}
+                            active={selected === node.id}
+                            onSelect={setSelected}
+                          />
+                        </div>
                       );
                     })}
-                  </svg>
-                  {boardNodes.map((node) => {
-                    const position = positions[node.id] || { x: 80, y: 80 };
-                    return (
-                      <div key={node.id} style={{ position: "absolute", left: position.x, top: position.y }}>
-                        <BoardCard node={node} active={selected === node.id} onSelect={setSelected} />
-                      </div>
-                    );
-                  })}
+                  </div>
                 </div>
-              </div>
-              {reviewNodes.length ? (
-                <div style={{ marginTop: 12 }}>
-                  <div style={{ ...label, marginBottom: 10 }}>External Reviews</div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 10 }}>
-                    {reviewNodes.map((node) => (
-                      <motion.button
-                        key={node.id}
-                        type="button"
-                        onClick={() => setSelected((prev) => (prev === node.id ? null : node.id))}
-                        initial={{ opacity: 0, y: 10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        style={{
-                          ...card,
-                          padding: 14,
-                          textAlign: "left",
-                          cursor: "pointer",
-                          borderColor: selected === node.id ? "#ef4444" : "rgba(239,68,68,0.16)",
-                          background: "rgba(56,20,20,0.26)",
-                        }}
+
+                {reviewNodes.length ? (
+                  <div className="review-section">
+                    <div className="section-kicker">External reviews</div>
+                    <div className="review-grid">
+                      {reviewNodes.map((node) => (
+                        <motion.button
+                          key={node.id}
+                          type="button"
+                          className={`review-card${selected === node.id ? " is-active" : ""}`}
+                          onClick={() =>
+                            setSelected((prev) => (prev === node.id ? null : node.id))
+                          }
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                        >
+                          <div className="review-topline">
+                            <span
+                              className="source-pill"
+                              style={{ "--accent": TYPE_CLR.review }}
+                            >
+                              {node.source}
+                            </span>
+                            <span className="status-pill">Review</span>
+                          </div>
+                          <div className="review-title">{node.title}</div>
+                          <div className="review-summary">{node.summary}</div>
+                        </motion.button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </section>
+            ) : null}
+
+            {view === "digest" ? (
+              <section className="view-shell">
+                <div className="digest-grid">
+                  {digestEntries.map((entry, index) => (
+                    <DigestCard
+                      key={entry.node_id}
+                      entry={entry}
+                      node={nodeMap[entry.node_id]}
+                      active={selected === entry.node_id}
+                      onSelect={setSelected}
+                      onSwap={swapDigestCards}
+                      index={index}
+                    />
+                  ))}
+                </div>
+              </section>
+            ) : null}
+
+            {view === "compare" && data?.matrix ? (
+              <section className="view-shell">
+                <div className="compare-frame">
+                  <div
+                    className="compare-grid"
+                    style={{
+                      gridTemplateColumns: `190px repeat(${compareColumns.length}, minmax(240px, 1fr))`,
+                    }}
+                  >
+                    <div className="compare-corner">Compare</div>
+
+                    {compareColumns.map(({ row, node }) => (
+                      <div
+                        key={row.node_id}
+                        className={`compare-column-head${
+                          selected === row.node_id ? " is-active" : ""
+                        }`}
                       >
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                          <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "#fca5a5", letterSpacing: "0.08em" }}>
-                            {node.source}
-                          </span>
-                          <span style={{ ...pill, padding: "2px 8px", fontSize: 10, color: "#fecaca", border: "1px solid rgba(248,113,113,0.18)", background: "rgba(127,29,29,0.18)" }}>
-                            external review
-                          </span>
+                        <span className="compare-source">{node?.source || "Captured"}</span>
+                        <strong>{node?.title || row.node_id}</strong>
+                      </div>
+                    ))}
+
+                    {data.matrix.columns.map((column) => (
+                      <Fragment key={column.key}>
+                        <div className="compare-row-title">
+                          <span>{column.label}</span>
                         </div>
-                        <div style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.35 }}>{node.title}</div>
-                        <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.55, color: "#d8c7c7" }}>{node.summary}</div>
-                      </motion.button>
+
+                        {compareColumns.map(({ row, node }) => {
+                          const cell = row.cells[column.key];
+                          const best = cell?.rank === 1;
+                          const worst = cell?.rank === visibleMatrixRows.length;
+
+                          return (
+                            <button
+                              key={`${row.node_id}-${column.key}`}
+                              type="button"
+                              className={`compare-cell${selected === row.node_id ? " is-active" : ""}${
+                                best ? " is-best" : ""
+                              }${worst ? " is-worst" : ""}${
+                                isViolated(node) ? " is-flagged" : ""
+                              }`}
+                              onClick={() =>
+                                setSelected((prev) =>
+                                  prev === row.node_id ? null : row.node_id,
+                                )
+                              }
+                            >
+                              {column.type === "sentiment" ? (
+                                <Badge sentiment={cell?.sentiment}>
+                                  {cell?.display || "Unknown"}
+                                </Badge>
+                              ) : (
+                                <span>{cell?.display || "Unknown"}</span>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </Fragment>
                     ))}
                   </div>
                 </div>
-              ) : null}
-            </section>
-          )}
-
-          {show("digest") && (
-            <section>
-              <div style={{ ...label, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span>Digest</span>
-                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, textTransform: "none", letterSpacing: 0, color: "#9ca3af" }}>
-                  Sort by
-                  <select
-                    value={sortMode}
-                    onChange={(event) => setSortMode(event.target.value)}
-                    style={{
-                      padding: "7px 10px",
-                      borderRadius: 10,
-                      border: "1px solid rgba(255,255,255,0.08)",
-                      background: "rgba(255,255,255,0.04)",
-                      color: "#e5e7eb",
-                    }}
-                  >
-                    {SORT_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 10 }}>
-                {digestEntries.map((entry, index) => (
-                  <DigestCard
-                    key={entry.node_id}
-                    entry={entry}
-                    node={nodeMap[entry.node_id]}
-                    active={selected === entry.node_id}
-                    onSelect={setSelected}
-                    onSwap={swapDigestCards}
-                    index={index}
-                  />
-                ))}
-              </div>
-            </section>
-          )}
-
-          {show("compare") && data?.matrix && (
-            <section>
-              <div style={label}>Compare - {data.matrix.rubric}</div>
-              <div style={{ ...card, padding: 12, overflowX: "auto" }}>
-                <div style={{ display: "grid", gridTemplateColumns: `190px repeat(${data.matrix.columns.length}, 1fr)`, gap: 6, minWidth: 760 }}>
-                  <div />
-                  {data.matrix.columns.map((column) => (
-                    <div key={column.key} style={{ padding: "8px 10px", fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", color: "#9ca3af" }}>
-                      {column.label}
-                    </div>
-                  ))}
-                  {visibleMatrixRows.map((row, rowIndex) => {
-                    const node = nodeMap[row.node_id];
-                    const active = selected === row.node_id;
-                    const violated = isViolated(node);
-                    return [
-                      <motion.div
-                        key={`label-${row.node_id}`}
-                        initial={{ opacity: 0, x: -8 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        transition={{ delay: rowIndex * 0.06 }}
-                        onClick={() => setSelected((prev) => (prev === row.node_id ? null : row.node_id))}
-                        style={{
-                          padding: "10px 12px",
-                          borderRadius: 8,
-                          border: `1px solid ${violated ? "#ef4444" : active ? "#3b82f6" : "rgba(255,255,255,0.04)"}`,
-                          background: "rgba(255,255,255,0.02)",
-                          cursor: "pointer",
-                        }}
-                      >
-                        <div style={{ fontWeight: 600, fontSize: 13 }}>{node?.title || row.node_id}</div>
-                        <div style={{ fontSize: 10, color: violated ? "#fca5a5" : "#6b7280" }}>
-                          {violated ? node?.metadata?.constraintReason || "Constraint mismatch" : node?.source || "Captured"}
-                        </div>
-                      </motion.div>,
-                      ...data.matrix.columns.map((column) => {
-                        const cell = row.cells[column.key];
-                        const best = cell?.rank === 1;
-                        const worst = cell?.rank === visibleMatrixRows.length;
-                        return (
-                          <motion.div
-                            key={`${row.node_id}-${column.key}`}
-                            initial={{ opacity: 0, y: 6 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            transition={{ delay: rowIndex * 0.06 + 0.03 }}
-                            style={{
-                              padding: "10px 12px",
-                              borderRadius: 8,
-                              display: "flex",
-                              alignItems: "center",
-                              background: violated
-                                ? "rgba(239,68,68,0.06)"
-                                : best
-                                  ? "rgba(34,197,94,0.07)"
-                                  : worst
-                                    ? "rgba(239,68,68,0.04)"
-                                    : "rgba(255,255,255,0.02)",
-                              border: `1px solid ${violated ? "rgba(239,68,68,0.2)" : best ? "rgba(34,197,94,0.15)" : "rgba(255,255,255,0.04)"}`,
-                            }}
-                          >
-                            {column.type === "sentiment" ? (
-                              <Badge sentiment={cell?.sentiment}>{cell?.display || "Unknown"}</Badge>
-                            ) : (
-                              <span style={{ fontSize: 13, color: violated ? "#fca5a5" : best ? "#22c55e" : "#d1d5db" }}>{cell?.display || "Unknown"}</span>
-                            )}
-                          </motion.div>
-                        );
-                      }),
-                    ];
-                  })}
-                </div>
-              </div>
-            </section>
-          )}
-        </div>
+              </section>
+            ) : null}
+          </section>
+        </main>
 
         <AnimatePresence>
           {selectedNode ? (
             <motion.aside
               key="detail"
-              initial={{ x: 30, opacity: 0 }}
+              className="detail-shell"
+              initial={{ x: 28, opacity: 0 }}
               animate={{ x: 0, opacity: 1 }}
-              exit={{ x: 30, opacity: 0 }}
-              transition={{ type: "spring", stiffness: 300, damping: 28 }}
-              style={{ borderLeft: "1px solid rgba(255,255,255,0.06)", background: "rgba(10,10,10,0.8)", backdropFilter: "blur(12px)", padding: 20, overflowY: "auto" }}
+              exit={{ x: 28, opacity: 0 }}
+              transition={{ type: "spring", stiffness: 260, damping: 28 }}
             >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: 16 }}>
-                <div>
-                  <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: TYPE_CLR[normalizeType(selectedNode.type)] || "#6b7280" }}>
-                    {selectedNode.source} · {selectedNode.type}
-                  </div>
-                  <h3 style={{ fontSize: 17, fontWeight: 600, margin: "4px 0 0" }}>{selectedNode.title}</h3>
-                  <div style={{ fontSize: 12, color: "#6b7280" }}>{selectedNode.subtitle}</div>
-                </div>
-                <button onClick={() => setSelected(null)} style={{ background: "rgba(255,255,255,0.06)", border: "none", borderRadius: 6, width: 24, height: 24, cursor: "pointer", color: "#9ca3af", fontSize: 14 }}>
-                  ×
+              <div className="detail-topline">
+                <span
+                  className="source-pill"
+                  style={{
+                    "--accent":
+                      TYPE_CLR[normalizeType(selectedNode.type)] || TYPE_CLR.item,
+                  }}
+                >
+                  {selectedNode.source} / {selectedNode.type}
+                </span>
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={() => setSelected(null)}
+                >
+                  <X size={16} strokeWidth={2.1} />
                 </button>
               </div>
 
-              <div style={{ ...card, padding: 12, marginBottom: 12 }}>
-                <div style={{ ...label, marginBottom: 4 }}>Summary</div>
-                <p style={{ fontSize: 13, lineHeight: 1.6, color: "#d1d5db", margin: 0 }}>{selectedNode.summary}</p>
+              <div className="detail-heading">
+                <h3>{selectedNode.title}</h3>
+                <p>{selectedNode.subtitle}</p>
               </div>
+
+              <section className="detail-block">
+                <div className="section-kicker">Summary</div>
+                <p>{selectedNode.summary}</p>
+              </section>
 
               {selectedNode.metadata?.constraintViolated ? (
-                <div style={{ ...card, padding: 12, marginBottom: 12, borderColor: "rgba(239,68,68,0.25)", background: "rgba(239,68,68,0.08)" }}>
-                  <div style={{ ...label, marginBottom: 4, color: "#fca5a5" }}>Constraint</div>
-                  <div style={{ color: "#fecaca", fontSize: 13 }}>{selectedNode.metadata.constraintReason || "Constraint mismatch"}</div>
-                </div>
+                <section className="detail-block constraint-block">
+                  <div className="section-kicker">Constraint</div>
+                  <p>{selectedNode.metadata.constraintReason || "Constraint mismatch"}</p>
+                </section>
               ) : null}
 
-              <div style={{ ...card, padding: 12, marginBottom: 12 }}>
-                <div style={{ ...label, marginBottom: 6 }}>Key metrics</div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0,1fr))", gap: 10 }}>
-                  <div>
-                    <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase" }}>Price</div>
-                    <div>{metaNumber(selectedNode, "priceUsd") ? `$${metaNumber(selectedNode, "priceUsd").toFixed(0)}` : "Unknown"}</div>
+                <section className="detail-block">
+                  <div className="section-kicker">Key metrics</div>
+                  <div className="detail-metric-grid">
+                    {selectedNode.metadata?.metrics?.map((m, i) => (
+                      <div key={i} className="metric-pair">
+                        <div className="metric-label">{m.label}</div>
+                        <div className="metric-value">{m.value}</div>
+                      </div>
+                    ))}
+                    <div className="metric-pair">
+                      <div className="metric-label">AI rank</div>
+                      <div className="metric-value">
+                        {metaNumber(selectedNode, "aiRank")
+                          ? `#${metaNumber(selectedNode, "aiRank").toFixed(0)}`
+                          : "Unknown"}
+                      </div>
+                    </div>
                   </div>
-                  <div>
-                    <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase" }}>Noise</div>
-                    <div>{metaNumber(selectedNode, "noiseLevelDb") ? `${metaNumber(selectedNode, "noiseLevelDb").toFixed(0)} dB` : metaText(selectedNode, "noiseDisplay")}</div>
-                  </div>
-                  <div>
-                    <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase" }}>Cooling</div>
-                    <div>{metaText(selectedNode, "coolingPerformance")}</div>
-                  </div>
-                  <div>
-                    <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase" }}>AI rank</div>
-                    <div>{metaNumber(selectedNode, "aiRank") ? `#${metaNumber(selectedNode, "aiRank").toFixed(0)}` : "Unknown"}</div>
-                  </div>
-                  <div>
-                    <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase" }}>Reviews</div>
-                    <div>{metaText(selectedNode, "reviewSentimentLabel")}</div>
-                  </div>
-                </div>
-              </div>
+                </section>
 
-              <div style={{ ...card, padding: 12, marginBottom: 12 }}>
-                <div style={{ ...label, marginBottom: 6 }}>Tags</div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-                  {selectedNode.tags?.map((tag) => (
-                    <span key={tag} style={pill}>
-                      {tag}
-                    </span>
-                  ))}
-                </div>
-              </div>
+              {selectedNode.tags?.length ? (
+                <section className="detail-block">
+                  <div className="section-kicker">Tags</div>
+                  <div className="detail-tag-row">
+                    {selectedNode.tags.map((tag) => (
+                      <span key={tag} className="signal-chip soft">
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
 
               {selectedNode.metadata && Object.keys(selectedNode.metadata).length > 0 ? (
-                <div style={{ ...card, padding: 12 }}>
-                  <div style={{ ...label, marginBottom: 4 }}>Metadata</div>
-                  {Object.entries(selectedNode.metadata).map(([key, value]) => (
-                    <div key={key} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid rgba(255,255,255,0.04)", fontSize: 12, gap: 12 }}>
-                      <span style={{ color: "#6b7280" }}>{key.replace(/_/g, " ")}</span>
-                      <span style={{ color: "#e5e7eb", fontWeight: 500, textAlign: "right" }}>{typeof value === "number" ? value.toLocaleString() : String(value)}</span>
-                    </div>
-                  ))}
-                </div>
+                <section className="detail-block">
+                  <div className="section-kicker">Metadata</div>
+                  <div className="metadata-list">
+                    {Object.entries(selectedNode.metadata).map(([key, value]) => (
+                      <div key={key} className="metadata-row">
+                        <span>{key.replace(/_/g, " ")}</span>
+                        <strong>
+                          {typeof value === "number"
+                            ? value.toLocaleString()
+                            : String(value)}
+                        </strong>
+                      </div>
+                    ))}
+                  </div>
+                </section>
               ) : null}
             </motion.aside>
           ) : null}

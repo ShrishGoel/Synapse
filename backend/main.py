@@ -12,7 +12,7 @@ from firecrawl import FirecrawlApp
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, ValidationError
 
-from backend.summarizer import SummarizerError, summarize_html
+from summarizer import SummarizerError, summarize_html
 
 
 def _parse_log_level(value: str | None) -> int:
@@ -107,6 +107,7 @@ class SynthesizeRequest(StrictModel):
     user_constraint: str | None = Field(default=None, min_length=1)
     active_tabs: list[ActiveTab] = Field(min_length=1)
     firecrawl_query_budget: int = Field(default=DEFAULT_FIRECRAWL_QUERY_BUDGET, ge=0, le=12)
+    previous_graph: dict[str, Any] | None = Field(default=None)
 
 
 class DomTab(StrictModel):
@@ -120,6 +121,7 @@ class SynthesizeFromDomRequest(StrictModel):
     user_constraint: str | None = Field(default=None, min_length=1)
     tabs: list[DomTab] = Field(min_length=1)
     firecrawl_query_budget: int = Field(default=DEFAULT_FIRECRAWL_QUERY_BUDGET, ge=0, le=12)
+    previous_graph: dict[str, Any] | None = Field(default=None)
 
 
 class SynthesizeFromExtensionRequest(StrictModel):
@@ -127,6 +129,7 @@ class SynthesizeFromExtensionRequest(StrictModel):
     user_constraint: str | None = Field(default=None, min_length=1)
     firecrawl_query_budget: int = Field(default=DEFAULT_FIRECRAWL_QUERY_BUDGET, ge=0, le=12)
     max_tabs: int = Field(default=20, ge=1, le=50)
+    previous_graph: dict[str, Any] | None = Field(default=None)
 
 class ExtensionSnapshot(StrictModel):
     url: HttpUrl
@@ -140,6 +143,9 @@ class ExtensionPreferencesRequest(StrictModel):
 
 
 class ComparisonRubric(StrictModel):
+    domain: str = Field(
+        description="A short, generic name for the category of items being researched (e.g., 'housing', 'products', 'software', 'locations').",
+    )
     fields: list[str] = Field(
         min_length=2,
         max_length=12,
@@ -198,6 +204,8 @@ class ReactFlowEdge(StrictModel):
 
 
 class ReactFlowGraphData(StrictModel):
+    domain: str = ""
+    rubric_fields: list[str] = Field(default_factory=list)
     nodes: list[ReactFlowNode]
     edges: list[ReactFlowEdge]
 
@@ -226,6 +234,7 @@ class SessionGraphEdge(StrictModel):
 
 
 class SessionGraph(StrictModel):
+    rubric_fields: list[str] = Field(default_factory=list)
     nodes: list[SessionGraphNode]
     edges: list[SessionGraphEdge]
 
@@ -295,6 +304,7 @@ class UnifiedSession(StrictModel):
     query: str
     domain: str
     status: str
+    rubric_fields: list[str] = Field(default_factory=list)
     graph: SessionGraph
     matrix: SessionMatrix
     digest: SessionDigest
@@ -764,72 +774,23 @@ async def _structured_llm_call(
 
 
 async def _build_rubric(payload: SynthesizeRequest, base_context: str) -> ComparisonRubric:
-    domain = _infer_session_domain(payload.user_prompt, None)
-    inferred_constraints: list[str] = []
-    if payload.user_constraint:
-        inferred_constraints.append(payload.user_constraint.strip())
-
-    if domain == "housing":
-        return ComparisonRubric(
-            fields=[
-                "Price USD",
-                "Distance to Anchor",
-                "Bedrooms",
-                "Bathrooms",
-                "Square Feet",
-                "Rental Type",
-                "Neighborhood",
-                "Lease Term",
-                "Source URL",
-            ],
-            inferred_constraints=inferred_constraints,
-            default_ordering="Best housing fit with price awareness",
-            seed_patterns=[
-                "Emphasis on affordability and commute fit",
-                "Compare concrete listing facts instead of marketing copy",
-                "Preserve captured listings as the primary decision set",
-            ],
-        )
-
-    if domain == "products":
-        return ComparisonRubric(
-            fields=[
-                "Price USD",
-                "External Review Consensus",
-                "Common Complaints",
-                "Noise Level (dB)",
-                "Cooling Performance",
-                "Fan Speed (RPM)",
-                "Fan Type & Count",
-                "Laptop Size Compatibility",
-                "USB Hub/Connectivity",
-                "Dust Protection",
-                "Source URL",
-            ],
-            inferred_constraints=inferred_constraints,
-            default_ordering="Best cooling performance among constraint matches, then price",
-            seed_patterns=[
-                "Prioritize concrete performance specs over generic copy",
-                "Separate seller claims from external owner or reviewer sentiment",
-                "Preserve the currently captured product set as the main comparison board",
-                "Highlight budget, noise, and cooling tradeoffs explicitly",
-            ],
-        )
-
-    return ComparisonRubric(
-        fields=[
-            "Price USD",
-            "Key Differentiator",
-            "Strengths",
-            "Tradeoffs",
-            "Source URL",
-        ],
-        inferred_constraints=inferred_constraints,
-        default_ordering="Most relevant options first",
-        seed_patterns=[
-            "Prefer concise comparisons grounded in captured evidence",
-            "Use discovery only when the prompt explicitly asks for broader investigation",
-        ],
+    return await _structured_llm_call(
+        model_type=ComparisonRubric,
+        schema_name="comparison_rubric",
+        system_prompt=(
+            "You are an expert research rubric designer. Based on the user's "
+            "query and the provided context from their current research session, "
+            "your job is to design a structured comparison rubric."
+        ),
+        user_prompt=(
+            f"User query: {payload.user_prompt}\n"
+            f"User constraint: {payload.user_constraint or 'None'}\n\n"
+            f"Context (snapshots the user has gathered):\n{base_context}\n\n"
+            "Generate a generic domain name (like 'housing' or 'products' or 'locations'), "
+            "5-10 useful comparison fields (MUST be human-readable and Title Cased, e.g. 'Monthly Rent' not 'monthly_rent'), "
+            "any inferred constraints, "
+            "a default ordering philosophy, and common patterns to look for."
+        ),
     )
 
 
@@ -923,7 +884,30 @@ async def _synthesize_graph(
     user_constraint: str | None = None,
     rubric: ComparisonRubric,
     context: str,
+    previous_graph: dict[str, Any] | None = None,
 ) -> ReactFlowGraphData:
+    previous_graph_context = ""
+    if previous_graph:
+        # Simplify the previous graph for context to keep token usage low
+        simplified_nodes = []
+        for node in previous_graph.get("nodes", []):
+            simplified_nodes.append({
+                "id": node.get("id"),
+                "title": node.get("title"),
+                "summary": node.get("summary"),
+                "url": node.get("source"), # SessionGraph uses 'source' for URL
+                "metadata": node.get("metadata", {})
+            })
+        
+        previous_graph_context = (
+            "\n### PREVIOUS WORKSPACE STATE\n"
+            "The following items are already in the user's graph. "
+            "STRICT RULE: You must preserve these items. You may update their 'aiRank', 'summary', "
+            "or 'attributes' if you have found more detailed information. "
+            "Add newly discovered items as additional nodes.\n"
+            f"{json.dumps({'nodes': simplified_nodes, 'edges': previous_graph.get('edges', [])})}\n\n"
+        )
+    
     graph = await _structured_llm_call(
         model_type=SynthesizedGraphData,
         schema_name="synthesized_graph_data",
@@ -931,13 +915,16 @@ async def _synthesize_graph(
             "You synthesize browser-tab research into React Flow graph JSON. "
             "Each node must include top-level fields title, url, sourceType, aiRank, aiReason, summary, "
             "constraintViolated, constraintReason, and attributes. Use attributes for rubric facts as "
-            "{label, value} pairs, using exact rubric field names whenever possible. "
+            "{label, value} pairs. CRITICAL: The label MUST be an exact match to one of the 'Rubric fields' provided. "
+            "Do not invent your own attribute labels. "
             "Do not stuff product specs, listing facts, or rankings into constraintReason. "
             "constraintReason is only for the user constraint result and must be empty when no user constraint is provided. "
             "Create meaningful edges between related products, concepts, tradeoffs, or evidence. Keep the user-provided seed items "
             "in the graph and add newly found items as additional nodes rather than replacing the seed set. "
             f"Use at most {MAX_SYNTHESIZED_GRAPH_NODES} total nodes and at most {MAX_SYNTHESIZED_GRAPH_EDGES} edges, "
             "keeping all seed items and filling the remaining capacity with the strongest discovered items only. "
+            "CRITICAL: NEVER create nodes for search directories, aggregators, or listicles (e.g., 'Arcadia Rental Search'). "
+            "ONLY create nodes for INDIVIDUAL items being researched (e.g., a specific apartment, a specific product). "
             f"Keep each url under {MAX_SYNTHESIZED_URL_CHARS} characters and prefer canonical URLs without tracking, checkout, "
             "affiliate, or session parameters. sourceType is either seed or discovered. "
             "When external review context is present, include External Review Consensus and Common Complaints "
@@ -951,16 +938,16 @@ async def _synthesize_graph(
             f"Inferred constraints:\n{rubric.inferred_constraints}\n\n"
             f"Seed patterns:\n{rubric.seed_patterns}\n\n"
             f"Default ordering:\n{rubric.default_ordering}\n\n"
+            f"{previous_graph_context}"
             f"Collected context:\n{context}\n\n"
             "Return strict graph data with nodes and edges only. Each node must contain: "
             "id, type, title, url, sourceType, aiRank, aiReason, summary, constraintViolated, constraintReason, and attributes. "
             "Put the domain facts in attributes instead of embedding them into aiReason or constraintReason. "
-            "Each attribute should be a short label/value pair. Use exact rubric field names for labels whenever possible. "
-            "For review prompts, preserve review/forum evidence in attributes such as External Review Consensus, "
-            "Common Complaints, Reddit Consensus, Review Summary, or Owner Feedback. "
-            "Keep all seed items, then choose only the most relevant discovered items if there are more candidates than the graph can hold."
+            "Each attribute should be a short label/value pair. The label MUST EXACTLY match a string from the 'Rubric fields' list. "
+            "If a rubric field is missing from the item, you may omit it or set value to 'Unknown'. "
+            "Keep all seed items and previous graph nodes, then choose only the most relevant discovered items if there are more candidates than the graph can hold."
         ),
-    )        
+    )
     if isinstance(graph, ReactFlowGraphData):
         return graph
     return _synthesized_graph_to_react_flow(graph)
@@ -1015,28 +1002,37 @@ def _parse_price_value(value: Any, fallback: float = 0) -> float:
         return fallback
 
     text = value.replace(",", "").strip()
-    money_matches = [
-        float(match)
-        for match in re.findall(r"\$\s*(\d+(?:\.\d+)?)", text)
-    ]
-    if not money_matches:
-        money_matches = [
-            float(match)
-            for match in re.findall(r"(\d+(?:\.\d+)?)\s*(?:usd|dollars?)", text, flags=re.IGNORECASE)
-        ]
-    if money_matches:
-        if len(money_matches) == 1:
-            return money_matches[0]
-        return sum(money_matches[:2]) / 2
+    
+    # Check for "free" first
+    if "free" in text.lower():
+        return 0.0
 
-    lowered = text.lower()
-    if "price" in lowered or "cost" in lowered:
-        numbers = _extract_numeric_values(text)
-        plausible = [number for number in numbers if 0 < number <= 100000]
-        if plausible:
-            if len(plausible) == 1:
-                return plausible[0]
-            return sum(plausible[:2]) / 2
+    # Try to match currencies explicitly
+    for currency_pattern in [
+        r"[\$€£]\s*(\d+(?:\.\d+)?)",
+        r"(\d+(?:\.\d+)?)\s*(?:usd|dollars?|eur|euros?|gbp|pounds?|/mo|per month)",
+    ]:
+        matches = [float(match) for match in re.findall(currency_pattern, text, flags=re.IGNORECASE)]
+        if matches:
+            # If we see something like "$3,800 · $4,000", take the first one or average
+            if len(matches) == 1:
+                return matches[0]
+            return sum(matches[:2]) / 2
+
+    # Look for numeric patterns that look like prices (e.g. "3800")
+    # Especially if they are at the end of a line or after a dot
+    numbers = _extract_numeric_values(text)
+    plausible = [number for number in numbers if number > 10] # Ignore tiny numbers
+    if plausible:
+        # If the original text had a '$', definitely use the numbers found
+        if "$" in value:
+            return plausible[0]
+        # For housing, numbers in the 500-15000 range are likely prices
+        housing_plausible = [n for n in plausible if 300 <= n <= 2500000]
+        if housing_plausible:
+            return housing_plausible[0]
+        return plausible[0]
+
     return fallback
 
 
@@ -1162,6 +1158,10 @@ def _build_backend_metrics(
         "Price USD",
         "Price",
         "Price Range",
+        "Rent",
+        "Monthly Rent",
+        "Listing Price",
+        "Cost",
         "External Review Consensus",
         "Common Complaints",
         "Review Summary",
@@ -1360,9 +1360,12 @@ def _synthesized_graph_to_react_flow(graph: SynthesizedGraphData) -> ReactFlowGr
         if node.chips:
             data["chips"] = list(node.chips)
 
+        attributes_list = []
         for attribute in node.attributes:
             if attribute.label and attribute.value:
                 data[attribute.label] = attribute.value
+                attributes_list.append({"label": attribute.label, "value": attribute.value})
+        data["attributes"] = attributes_list
 
         nodes.append(
             ReactFlowNode(
@@ -1394,7 +1397,7 @@ def _canonicalize_graph_for_frontend(graph: ReactFlowGraphData) -> ReactFlowGrap
         source_label = _hostname_label(url) if url else _stringify_data_value(_lookup_data_value(raw_data, ["Source", "source", "Brand"]), "Captured")
         location_label = _stringify_data_value(_lookup_data_value(raw_data, ["locationLabel", "Neighborhood", "Location", "Brand", "Platform"]), "Unknown")
         kind_label = _stringify_data_value(_lookup_data_value(raw_data, ["kind", "Type", "Rental Type", "Cooling Method", "Cooling Mechanism", "Product Type"]), "Item")
-        price_usd = _parse_price_value(_lookup_data_value(raw_data, ["priceUsd", "Price USD", "Price", "Price Range"]))
+        price_usd = _parse_price_value(_lookup_data_value(raw_data, ["priceUsd", "Price USD", "Price", "Price Range", "Rent", "Monthly Rent", "Listing Price"]))
         distance_miles = _parse_data_number(_lookup_data_value(raw_data, ["distanceMiles", "Distance to Anchor", "Noise Level", "Noise Level (dB)"]))
         bedrooms = _parse_data_number(_lookup_data_value(raw_data, ["bedrooms", "Bedrooms", "Number of Fans", "Fan Count", "Fan Type/Count", "Fan Type & Count"]))
         bathrooms = _parse_data_number(_lookup_data_value(raw_data, ["bathrooms", "Bathrooms", "Adjustable Height Levels", "Modes"]))
@@ -1414,7 +1417,11 @@ def _canonicalize_graph_for_frontend(graph: ReactFlowGraphData) -> ReactFlowGrap
         noise_level_db = _parse_range_midpoint(_lookup_data_value(raw_data, ["noiseLevelDb", "Noise Level (dB)", "Noise Level"]), 0)
         cooling_performance, cooling_performance_score = _derive_cooling_performance(raw_data, fan_speed_rpm, ai_reason)
         status_label = _stringify_data_value(_lookup_data_value(raw_data, ["status", "Status"])) or ("enriched" if source_type == "discovered" else "captured")
-        metrics = _build_backend_metrics(raw_data, price_usd, distance_miles, bedrooms, bathrooms, square_feet, rental_type)
+        attributes_list = raw_data.get("attributes")
+        if isinstance(attributes_list, list) and len(attributes_list) > 0:
+            metrics = attributes_list[:6]
+        else:
+            metrics = _build_backend_metrics(raw_data, price_usd, distance_miles, bedrooms, bathrooms, square_feet, rental_type)
         chips = _build_backend_chips(raw_data, metrics, source_type)
         raw_copy = dict(raw_data)
 
@@ -1454,20 +1461,7 @@ def _canonicalize_graph_for_frontend(graph: ReactFlowGraphData) -> ReactFlowGrap
     return ReactFlowGraphData.model_validate(payload)
 
 
-def _infer_session_domain(query: str, graph: ReactFlowGraphData | None) -> str:
-    prompt = query.lower()
-    blob = ""
-    if graph is not None:
-        blob = " ".join(
-            " ".join(str(value) for value in dict(node.data).values())
-            for node in graph.nodes
-        ).lower()
-    combined = f"{prompt} {blob}"
-    if any(token in combined for token in ["apartment", "rental", "rent", "landlord", "studio", "bedroom", "lease", "housing"]):
-        return "housing"
-    if any(token in combined for token in ["cooler", "cooling pad", "laptop cooler", "rpm", "fan", "gaming laptop"]):
-        return "products"
-    return "research"
+
 
 
 def _extract_price_constraint(user_constraint: str | None) -> tuple[str, float] | None:
@@ -1677,7 +1671,11 @@ def _build_session_graph(graph: ReactFlowGraphData) -> SessionGraph:
         )
         for edge in graph.edges
     ]
-    return SessionGraph(nodes=session_nodes, edges=session_edges)
+    return SessionGraph(
+        rubric_fields=list(graph.rubric_fields),
+        nodes=session_nodes,
+        edges=session_edges,
+    )
 
 
 def _rank_values(values: list[float], *, reverse: bool = False) -> dict[float, int]:
@@ -1687,114 +1685,51 @@ def _rank_values(values: list[float], *, reverse: bool = False) -> dict[float, i
 
 def _build_session_matrix(query: str, domain: str, graph: ReactFlowGraphData) -> SessionMatrix:
     option_nodes = list(graph.nodes)
-
-    if domain == "housing":
-        columns = [
-            SessionMatrixColumn(key="price", label="Monthly Cost", type="currency", highlight_best=True),
-            SessionMatrixColumn(key="commute", label="Distance", type="text"),
-            SessionMatrixColumn(key="trust", label="Trust Signal", type="sentiment"),
-            SessionMatrixColumn(key="friction", label="Friction", type="text"),
-        ]
-    elif domain == "products":
-        columns = [
-            SessionMatrixColumn(key="price", label="Price", type="currency", highlight_best=True),
-            SessionMatrixColumn(key="noise", label="Noise", type="text"),
-            SessionMatrixColumn(key="cooling", label="Cooling", type="text"),
-            SessionMatrixColumn(key="reviews", label="Reviews", type="sentiment"),
-            SessionMatrixColumn(key="aiChoice", label="AI Choice", type="text"),
-        ]
-    else:
-        columns = [
-            SessionMatrixColumn(key="score", label="Rank", type="text", highlight_best=True),
-            SessionMatrixColumn(key="source", label="Source", type="text"),
-            SessionMatrixColumn(key="signal", label="Signal", type="text"),
-            SessionMatrixColumn(key="notes", label="Notes", type="text"),
-        ]
-
-    price_values = [
-        _parse_data_number(dict(node.data).get("priceUsd"))
-        for node in option_nodes
-        if _parse_data_number(dict(node.data).get("priceUsd")) > 0
+    rubric_fields = graph.rubric_fields if hasattr(graph, "rubric_fields") and graph.rubric_fields else ["Details"]
+    
+    columns = [
+        SessionMatrixColumn(key="score", label="Rank", type="text", highlight_best=True)
     ]
-    price_ranks = _rank_values(price_values) if price_values else {}
-
+    
+    # Generate dynamic columns from up to 5 rubric fields
+    for i, field in enumerate(rubric_fields[:5]):
+        col_type = "currency" if "price" in field.lower() or "cost" in field.lower() else "text"
+        columns.append(SessionMatrixColumn(key=f"attr_{i}", label=field, type=col_type))
+        
+    columns.append(SessionMatrixColumn(key="notes", label="Notes", type="text"))
+    
     rows: list[SessionMatrixRow] = []
     for node in option_nodes:
         data = dict(node.data)
-        price_usd = _parse_data_number(data.get("priceUsd"))
-        distance_miles = _parse_data_number(data.get("distanceMiles"))
-        summary = _stringify_data_value(data.get("summary"))
-        chips = [str(chip) for chip in list(data.get("chips") or [])]
-        risk_text = _stringify_data_value(data.get("constraintReason")) or (chips[-1] if chips else "Low context")
-
-        if domain == "housing":
-            trust_sentiment = "negative" if data.get("constraintViolated") else "neutral"
-            trust_display = "Constraint mismatch" if data.get("constraintViolated") else "Within target"
-            cells = {
-                "price": SessionMatrixCell(
-                    value=price_usd or None,
-                    display=f"${price_usd:,.0f}" if price_usd > 0 else "Unknown",
-                    rank=price_ranks.get(price_usd),
-                ),
-                "commute": SessionMatrixCell(
-                    value=distance_miles or None,
-                    display=f"{distance_miles:g} mi" if distance_miles > 0 else "Unknown",
-                ),
-                "trust": SessionMatrixCell(
-                    value=None if trust_sentiment == "neutral" else -1,
-                    display=trust_display,
-                    sentiment=trust_sentiment,
-                ),
-                "friction": SessionMatrixCell(
-                    value=None,
-                    display=risk_text,
-                ),
-            }
-        elif domain == "products":
-            performance_display = _stringify_data_value(data.get("coolingPerformance")) or next(
-                (
-                    f"{metric['label']} {metric['value']}"
-                    for metric in list(data.get("metrics") or [])
-                    if isinstance(metric, dict) and any(token in str(metric.get("label", "")).lower() for token in ["cooling", "performance", "fan", "speed"])
-                ),
-                "Unknown",
-            )
-            noise_display = _stringify_data_value(data.get("noiseDisplay")) or next(
-                (
-                    f"{metric['label']} {metric['value']}"
-                    for metric in list(data.get("metrics") or [])
-                    if isinstance(metric, dict) and "noise" in str(metric.get("label", "")).lower()
-                ),
-                "Unknown",
-            )
-            ai_choice_display = f"AI #{int(_parse_data_number(data.get('aiRank'), 0))}" if _parse_data_number(data.get("aiRank"), 0) > 0 else "Unranked"
-            review_sentiment = _stringify_data_value(data.get("reviewSentiment"), "unknown").lower()
-            review_display = _stringify_data_value(data.get("reviewSentimentLabel"), "Unknown")
-            cells = {
-                "price": SessionMatrixCell(
-                    value=price_usd or None,
-                    display=f"${price_usd:,.0f}" if price_usd > 0 else "Unknown",
-                    rank=price_ranks.get(price_usd),
-                ),
-                "noise": SessionMatrixCell(value=data.get("noiseLevelDb"), display=noise_display),
-                "cooling": SessionMatrixCell(value=data.get("coolingPerformanceScore"), display=performance_display),
-                "reviews": SessionMatrixCell(value=None, display=review_display, sentiment=review_sentiment),
-                "aiChoice": SessionMatrixCell(value=data.get("aiRank"), display=ai_choice_display, rank=int(_parse_data_number(data.get("aiRank"), 0)) or None),
-            }
-        else:
-            ai_rank = int(_parse_data_number(data.get("aiRank"), 0)) or None
-            signal_display = chips[0] if chips else summary[:60] or "Unknown"
-            cells = {
-                "score": SessionMatrixCell(value=ai_rank, display=f"#{ai_rank}" if ai_rank else "Unknown", rank=ai_rank),
-                "source": SessionMatrixCell(value=None, display=_stringify_data_value(data.get("sourceLabel"), "Captured")),
-                "signal": SessionMatrixCell(value=None, display=signal_display),
-                "notes": SessionMatrixCell(value=None, display=risk_text),
-            }
-
+        ai_rank = int(_parse_data_number(data.get("aiRank"), 0)) or None
+        
+        cells = {
+            "score": SessionMatrixCell(value=ai_rank, display=f"#{ai_rank}" if ai_rank else "Unknown", rank=ai_rank),
+        }
+        
+        for i, field in enumerate(rubric_fields[:5]):
+            # Try to find the exact or normalized key in attributes or data
+            val = ""
+            # Search in the dynamic attributes array first
+            for attr in data.get("attributes", []):
+                if _normalize_data_key(attr.get("label", "")) == _normalize_data_key(field):
+                    val = _stringify_data_value(attr.get("value"))
+                    break
+            
+            # Fallback to direct keys
+            if not val:
+                val = _stringify_data_value(_lookup_data_value(data, [field, _normalize_data_key(field)]))
+                
+            cells[f"attr_{i}"] = SessionMatrixCell(value=None, display=val if val else "Unknown")
+            
+        risk_text = _stringify_data_value(data.get("constraintReason"))
+        cells["notes"] = SessionMatrixCell(value=None, display=risk_text or "No issues")
+        
         rows.append(SessionMatrixRow(node_id=node.id, cells=cells))
 
-    rubric = "Housing Comparison" if domain == "housing" else "Product Comparison" if domain == "products" else "Research Comparison"
-    return SessionMatrix(rubric=rubric, columns=columns, rows=rows)
+    # Keep a nice rubric name
+    rubric_title = f"{domain.capitalize()} Comparison" if domain else "Research Comparison"
+    return SessionMatrix(rubric=rubric_title, columns=columns, rows=rows)
 
 
 def _build_session_digest(query: str, domain: str, graph: ReactFlowGraphData) -> SessionDigest:
@@ -1855,7 +1790,7 @@ def _build_session_digest(query: str, domain: str, graph: ReactFlowGraphData) ->
 
 def _graph_to_unified_session(graph: ReactFlowGraphData, query: str, user_constraint: str | None = None) -> UnifiedSession:
     constrained_graph = _apply_deterministic_constraints(graph, user_constraint)
-    domain = _infer_session_domain(query, constrained_graph)
+    domain = graph.domain or "research"
     session_graph = _build_session_graph(constrained_graph)
     session_matrix = _build_session_matrix(query, domain, constrained_graph)
     session_digest = _build_session_digest(query, domain, constrained_graph)
@@ -1869,6 +1804,7 @@ def _graph_to_unified_session(graph: ReactFlowGraphData, query: str, user_constr
         query=query,
         domain=domain,
         status=overall_status,
+        rubric_fields=list(graph.rubric_fields),
         graph=session_graph,
         matrix=session_matrix,
         digest=session_digest,
@@ -2195,6 +2131,7 @@ async def synthesize(payload: SynthesizeRequest) -> ReactFlowGraphData:
             user_constraint=payload.user_constraint,
             rubric=rubric,
             context=context,
+            previous_graph=payload.previous_graph,
         )
         logger.debug("Raw graph snapshot=%s", _debug_json(_graph_debug_payload(raw_graph)))
         filtered_graph = _filter_graph_for_prompt(raw_graph, payload.user_prompt)
@@ -2205,6 +2142,8 @@ async def synthesize(payload: SynthesizeRequest) -> ReactFlowGraphData:
                 len(filtered_graph.nodes),
             )
         graph = _canonicalize_graph_for_frontend(filtered_graph)
+        graph.domain = rubric.domain
+        graph.rubric_fields = rubric.fields
         logger.debug("Canonical graph snapshot=%s", _debug_json(_graph_debug_payload(graph)))
         placeholder_like_nodes = [
             node.id
@@ -2244,6 +2183,7 @@ async def synthesize_from_dom(payload: SynthesizeFromDomRequest) -> ReactFlowGra
             user_constraint=payload.user_constraint,
             active_tabs=active_tabs,
             firecrawl_query_budget=payload.firecrawl_query_budget,
+            previous_graph=payload.previous_graph,
         )
         return await synthesize(synthesize_payload)
     except SummarizerError as exc:
@@ -2292,6 +2232,7 @@ async def synthesize_from_extension_history(payload: SynthesizeFromExtensionRequ
             user_prompt=payload.user_prompt,
             user_constraint=payload.user_constraint,
             firecrawl_query_budget=payload.firecrawl_query_budget,
+            previous_graph=payload.previous_graph,
             tabs=[
                 DomTab(
                     url=entry["url"],
