@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>DOM History</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Outfit:wght@500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <div class="app-container">
+      <header>
+        <div class="header-content">
+          <h1>DOM History</h1>
+          <p id="summary">Initializing...</p>
+        </div>
+        <button id="clearButton" type="button" title="Clear all history">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18m-2 0v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6m3 0V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg>
+          Clear
+        </button>
+      </header>
+
+      <main>
+        <ol id="historyList" aria-label="Captured pages"></ol>
+        <section id="emptyState" hidden>
+          <div class="empty-icon">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
+              <polyline points="13 2 13 9 20 9"></polyline>
+            </svg>
+          </div>
+          <p>No snapshots captured in the last 30 minutes.</p>
+        </section>
+      </main>
+    </div>
+
+    <template id="historyItemTemplate">
+      <li class="history-card">
+        <button class="entryButton" type="button">
+          <div class="entry-header">
+            <div class="entry-icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+            </div>
+            <div class="entry-info">
+              <span class="entryTitle"></span>
+              <span class="entryUrl"></span>
+            </div>
+            <div class="entry-chevron">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </div>
+          </div>
+          <div class="entry-footer">
+            <span class="entryMeta"></span>
+          </div>
+        </button>
+        <div class="dom-preview-container">
+          <div class="preview-actions">
+            <button class="copy-button" type="button" title="Copy DOM snapshot">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              <span>Copy</span>
+            </button>
+          </div>
+          <textarea class="domPreview" readonly spellcheck="false"></textarea>
+        </div>
+      </li>
+    </template>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
