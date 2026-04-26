@@ -2,7 +2,6 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   BookText,
-  ExternalLink,
   LayoutGrid,
   Loader2,
   Search,
@@ -111,72 +110,12 @@ function metaText(node, key, fallback = "Unknown") {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
 
-function reviewMetricForNode(node) {
-  const metrics = node?.metadata?.metrics || [];
-  const metricMatch = metrics.find((metric) =>
-    /review|consensus|feedback|complaint/i.test(String(metric?.label || "")),
-  );
-  if (metricMatch) {
-    return metricMatch;
-  }
-  const reviewConsensus = metaText(node, "Review Consensus", "");
-  if (reviewConsensus) {
-    return { label: "Review Consensus", value: reviewConsensus };
-  }
-  return null;
-}
-
-function subtitleWithoutDuplicateReview(node, reviewMetric) {
-  const subtitle = String(node?.subtitle || "").trim();
-  if (!subtitle || !reviewMetric?.value) {
-    return subtitle;
-  }
-  const normalizedReviewLabel = String(reviewMetric.label || "").trim().toLowerCase();
-  const normalizedReviewValue = String(reviewMetric.value || "").trim().toLowerCase();
-  const cleanedParts = subtitle
-    .split("|")
-    .map((part) => part.trim())
-    .filter((part) => {
-      const normalizedPart = part.replace(/\s+/g, " ").trim().toLowerCase();
-      if (!normalizedPart) {
-        return false;
-      }
-      if (normalizedReviewLabel && normalizedPart.includes(normalizedReviewLabel)) {
-        return false;
-      }
-      if (normalizedReviewValue && normalizedPart.includes(normalizedReviewValue)) {
-        return false;
-      }
-      return !/review|consensus|feedback|complaint/i.test(part);
-    });
-  return cleanedParts.join(" | ");
-}
-
-function cardMetricsForNode(node, limit = 3) {
-  const metrics = Array.isArray(node?.metadata?.metrics) ? node.metadata.metrics : [];
-  if (!metrics.length) {
-    return [];
-  }
-  const reviewMetric = reviewMetricForNode(node);
-  const filtered = reviewMetric
-    ? metrics.filter(
-        (metric) =>
-          String(metric?.label || "").trim() !== String(reviewMetric.label || "").trim(),
-      )
-    : metrics;
-  return filtered.slice(0, limit);
-}
-
 function isViolated(node) {
   return Boolean(node?.metadata?.constraintViolated);
 }
 
 function isDiscoveredNode(node) {
   return node?.metadata?.sourceType === "discovered";
-}
-
-function isSeedNode(node) {
-  return !isDiscoveredNode(node);
 }
 
 function isExternalReviewNode(node) {
@@ -405,7 +344,7 @@ function computeLayout(nodes, viewportWidth, boardWidth, boardHeight) {
   return positions;
 }
 
-async function fetchSession(query, constraint, enableDiscovery, previousSession) {
+async function fetchSession(query, constraint, previousSession) {
   const statsResponse = await fetch(`${API_BASE}/api/v1/extension/history/stats`);
   if (!statsResponse.ok) {
     throw new Error(
@@ -423,11 +362,10 @@ async function fetchSession(query, constraint, enableDiscovery, previousSession)
   const bodyPayload = {
     user_prompt: query,
     user_constraint: constraint || null,
-    firecrawl_query_budget: enableDiscovery ? 4 : 0,
+    firecrawl_query_budget: 4,
     max_tabs: 20,
-    enable_discovery: Boolean(enableDiscovery),
   };
-  if (enableDiscovery && previousSession && previousSession.graph) {
+  if (previousSession && previousSession.graph) {
     bodyPayload.previous_graph = previousSession.graph;
   }
 
@@ -494,9 +432,7 @@ function LoadingOverlay({ message }) {
 function BoardCard({ node, active, onSelect }) {
   const color = TYPE_CLR[normalizeType(node.type)] || TYPE_CLR.item;
   const violated = isViolated(node);
-  const metrics = cardMetricsForNode(node, 3);
-  const reviewMetric = reviewMetricForNode(node);
-  const subtitle = subtitleWithoutDuplicateReview(node, reviewMetric);
+  const metrics = node.metadata?.metrics?.slice(0, 3) || [];
 
   return (
     <motion.button
@@ -520,13 +456,7 @@ function BoardCard({ node, active, onSelect }) {
       </div>
 
       <div className="board-node-title">{node.title}</div>
-      {subtitle ? <div className="board-node-subtitle">{subtitle}</div> : null}
-
-      {reviewMetric ? (
-        <div className="board-node-review-consensus">
-          {reviewMetric.label}: {reviewMetric.value}
-        </div>
-      ) : null}
+      <div className="board-node-subtitle">{node.subtitle}</div>
 
       {violated && node.metadata?.constraintReason ? (
         <div className="board-node-warning">{node.metadata.constraintReason}</div>
@@ -550,8 +480,7 @@ function DigestCard({ entry, node, active, onSelect, onSwap, index }) {
   const color = TYPE_CLR[normalizeType(node?.type)] || TYPE_CLR.item;
   const violated = isViolated(node);
   const aiRank = metaNumber(node, "aiRank");
-  const metrics = cardMetricsForNode(node, 3);
-  const reviewMetric = reviewMetricForNode(node);
+  const metrics = node?.metadata?.metrics?.slice(0, 3) || [];
 
   return (
     <motion.div
@@ -596,12 +525,6 @@ function DigestCard({ entry, node, active, onSelect, onSwap, index }) {
 
       <div className="digest-title">{node?.title || entry.node_id}</div>
       <div className="digest-summary">{entry.summary}</div>
-
-      {reviewMetric ? (
-        <div className="digest-review-consensus">
-          {reviewMetric.label}: {reviewMetric.value}
-        </div>
-      ) : null}
 
       {metrics.length > 0 && (
         <div className="digest-metrics">
@@ -667,7 +590,6 @@ export default function App() {
   const [digestOrder, setDigestOrder] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
-  const [enableDiscovery, setEnableDiscovery] = useState(true);
   const [viewportWidth, setViewportWidth] = useState(() =>
     typeof window === "undefined" ? 1280 : window.innerWidth,
   );
@@ -678,22 +600,6 @@ export default function App() {
     [data],
   );
   const selectedNode = selected ? nodeMap[selected] : null;
-  const selectedMetadataEntries = useMemo(() => {
-    if (!selectedNode?.metadata) {
-      return [];
-    }
-    const hasReviewConsensus =
-      typeof selectedNode.metadata["Review Consensus"] === "string" &&
-      selectedNode.metadata["Review Consensus"].trim();
-    return Object.entries(selectedNode.metadata).filter(
-      ([key, value]) =>
-        key !== "metrics" &&
-        !(hasReviewConsensus && key === "Review Sentiment") &&
-        (typeof value === "string" ||
-          typeof value === "number" ||
-          typeof value === "boolean"),
-    );
-  }, [selectedNode]);
   const boardAxes = useMemo(() => axisMetaForDomain(data?.domain), [data]);
 
   const allNodes = useMemo(() => data?.graph?.nodes || [], [data]);
@@ -772,30 +678,34 @@ export default function App() {
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
-  async function runQuery(nextQuery, nextConstraint, nextEnableDiscovery = enableDiscovery) {
+  async function runQuery(nextQuery, nextConstraint) {
     const resolvedQuery = nextQuery.trim() || DEFAULT_QUERY;
     const resolvedConstraint = nextConstraint.trim();
     setIsLoading(true);
     setError("");
 
     try {
-      const appliedConstraint = typeof session?.user_constraint === "string"
-        ? session.user_constraint.trim()
-        : "";
+      const appliedConstraint =
+        session?.digest?.theme_signals
+          ?.find(
+            (signal) =>
+              typeof signal === "string" && signal.startsWith("constraint:"),
+          )
+          ?.replace(/^constraint:\s*/i, "")
+          ?.trim() || "";
 
       const shouldReuseSession =
-        Boolean(session) &&
+        session &&
         typeof session.query === "string" &&
         session.query.trim().toLowerCase() === resolvedQuery.toLowerCase() &&
         appliedConstraint !== resolvedConstraint;
 
       const payload = shouldReuseSession
         ? await applyConstraintToSession(session, resolvedConstraint)
-        : await fetchSession(resolvedQuery, resolvedConstraint, nextEnableDiscovery, session);
+        : await fetchSession(resolvedQuery, resolvedConstraint, session);
 
       setSession(payload);
       setQuery(payload.query || resolvedQuery);
-      setEnableDiscovery(Boolean(nextEnableDiscovery));
       setSelected(null);
       setDigestOrder([]);
     } catch (requestError) {
@@ -813,13 +723,9 @@ export default function App() {
     const params = new URLSearchParams(window.location.search);
     const prompt = params.get("prompt")?.trim() || DEFAULT_QUERY;
     const constraintParam = params.get("constraint")?.trim() || "";
-    const discoveryParam = params.get("discover");
-    const discoveryEnabled =
-      discoveryParam == null ? true : !["0", "false", "off"].includes(discoveryParam.toLowerCase());
     setQuery(prompt);
     setConstraint(constraintParam);
-    setEnableDiscovery(discoveryEnabled);
-    runQuery(prompt, constraintParam, discoveryEnabled);
+    runQuery(prompt, constraintParam);
   }, []);
 
   const baseDigestEntries = useMemo(() => {
@@ -908,17 +814,6 @@ export default function App() {
   const leadBoardNode = boardNodes[0] || null;
   const flaggedBoardCount = boardNodes.filter((node) => isViolated(node)).length;
   const discoveredBoardCount = boardNodes.filter((node) => isDiscoveredNode(node)).length;
-  const capturedBoardCount = boardNodes.filter((node) => isSeedNode(node)).length;
-
-  function handleRunSubmit(event) {
-    event.preventDefault();
-    const formData = new FormData(event.currentTarget);
-    const nextQuery = String(formData.get("query") || "");
-    const nextConstraint = String(formData.get("constraint") || "");
-    setQuery(nextQuery);
-    setConstraint(nextConstraint);
-    runQuery(nextQuery, nextConstraint);
-  }
 
   return (
     <div className="synapse-app">
@@ -949,7 +844,15 @@ export default function App() {
       <section className="control-shell">
         <form
           className="control-form"
-          onSubmit={handleRunSubmit}
+          onSubmit={(event) => {
+            event.preventDefault();
+            const formData = new FormData(event.currentTarget);
+            const submittedQuery = String(formData.get("query") || query).trim() || DEFAULT_QUERY;
+            const submittedConstraint = String(formData.get("constraint") || "");
+            setQuery(submittedQuery);
+            setConstraint(submittedConstraint);
+            runQuery(submittedQuery, submittedConstraint);
+          }}
         >
           <label className="input-shell prompt-shell">
             <Search size={16} strokeWidth={2.1} />
@@ -1002,31 +905,17 @@ export default function App() {
           <div className="stats-cluster">
             <span className="stat-chip">{boardNodes.length} canvas</span>
             <span className="stat-chip">{digestEntries.length} digest</span>
-            <span className="stat-chip">{capturedBoardCount} captured</span>
-            <span className="stat-chip">{discoveredBoardCount} AI found</span>
             <button
               type="button"
               className={`stat-chip button-chip${showDiscovered ? " is-on" : ""}`}
               onClick={() => setShowDiscovered((current) => !current)}
               title={
                 showDiscovered
-                  ? "Showing captured tabs and AI-discovered nodes"
-                  : "Showing captured tabs only"
+                  ? "Showing captured and AI-discovered nodes"
+                  : "Showing captured nodes only"
               }
             >
-              AI results {showDiscovered ? "on" : "off"}
-            </button>
-            <button
-              type="button"
-              className={`stat-chip button-chip${enableDiscovery ? " is-on" : ""}${enableDiscovery ? "" : " is-muted"}`}
-              onClick={() => setEnableDiscovery((current) => !current)}
-              title={
-                enableDiscovery
-                  ? "Firecrawl discovery is enabled for the next synthesis run"
-                  : "Firecrawl discovery is disabled for the next synthesis run"
-              }
-            >
-              Find more with AI {enableDiscovery ? "on" : "off"}
+              AI {showDiscovered ? "on" : "off"}
             </button>
           </div>
         </div>
@@ -1368,21 +1257,6 @@ export default function App() {
                 <p>{selectedNode.subtitle}</p>
               </div>
 
-              {selectedNode.url ? (
-                <section className="detail-block">
-                  <div className="section-kicker">Open product</div>
-                  <a
-                    className="detail-link-button"
-                    href={selectedNode.url}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    <span>Visit listing</span>
-                    <ExternalLink size={15} strokeWidth={2.1} />
-                  </a>
-                </section>
-              ) : null}
-
               <section className="detail-block">
                 <div className="section-kicker">Summary</div>
                 <p>{selectedNode.summary}</p>
@@ -1395,25 +1269,25 @@ export default function App() {
                 </section>
               ) : null}
 
-              <section className="detail-block">
-                <div className="section-kicker">Key metrics</div>
-                <div className="detail-metric-grid">
-                  {selectedNode.metadata?.metrics?.map((m, i) => (
-                    <div key={i} className="metric-pair">
-                      <div className="metric-label">{m.label}</div>
-                      <div className="metric-value">{m.value}</div>
-                    </div>
-                  ))}
-                  <div className="metric-pair">
-                    <div className="metric-label">AI rank</div>
-                    <div className="metric-value">
-                      {metaNumber(selectedNode, "aiRank")
-                        ? `#${metaNumber(selectedNode, "aiRank").toFixed(0)}`
-                        : "Unknown"}
+                <section className="detail-block">
+                  <div className="section-kicker">Key metrics</div>
+                  <div className="detail-metric-grid">
+                    {selectedNode.metadata?.metrics?.map((m, i) => (
+                      <div key={i} className="metric-pair">
+                        <div className="metric-label">{m.label}</div>
+                        <div className="metric-value">{m.value}</div>
+                      </div>
+                    ))}
+                    <div className="metric-pair">
+                      <div className="metric-label">AI rank</div>
+                      <div className="metric-value">
+                        {metaNumber(selectedNode, "aiRank")
+                          ? `#${metaNumber(selectedNode, "aiRank").toFixed(0)}`
+                          : "Unknown"}
+                      </div>
                     </div>
                   </div>
-                </div>
-              </section>
+                </section>
 
               {selectedNode.tags?.length ? (
                 <section className="detail-block">
@@ -1428,11 +1302,11 @@ export default function App() {
                 </section>
               ) : null}
 
-              {selectedMetadataEntries.length > 0 ? (
+              {selectedNode.metadata && Object.keys(selectedNode.metadata).length > 0 ? (
                 <section className="detail-block">
                   <div className="section-kicker">Metadata</div>
                   <div className="metadata-list">
-                    {selectedMetadataEntries.map(([key, value]) => (
+                    {Object.entries(selectedNode.metadata).map(([key, value]) => (
                       <div key={key} className="metadata-row">
                         <span>{key.replace(/_/g, " ")}</span>
                         <strong>
