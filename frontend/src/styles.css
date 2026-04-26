@@ -275,6 +275,12 @@ button {
   font-weight: 600;
 }
 
+.stat-chip.is-muted {
+  color: var(--text-soft);
+  border-color: rgba(236, 228, 214, 0.08);
+  background: rgba(255, 248, 236, 0.018);
+}
+
 .signal-chip.soft {
   color: var(--text-dim);
 }
@@ -388,8 +394,8 @@ button {
 .detail-shell {
   display: grid;
   align-content: start;
-  gap: 14px;
-  padding: 20px;
+  gap: 18px;
+  padding: 24px;
 }
 
 .stage-header {
@@ -687,6 +693,12 @@ button {
   background: var(--bg-soft);
 }
 
+.detail-block {
+  display: grid;
+  gap: 14px;
+  padding: 16px 18px;
+}
+
 .board-node-card {
   display: grid;
   gap: 12px;
@@ -775,6 +787,17 @@ button {
 .board-node-warning {
   color: #edc3b5;
   font-size: 12px;
+}
+
+.board-node-review-consensus,
+.digest-review-consensus {
+  padding: 10px 12px;
+  border: 1px solid rgba(208, 171, 103, 0.18);
+  border-radius: 12px;
+  background: rgba(208, 171, 103, 0.08);
+  color: #e7cf9f;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .board-node-metrics,
@@ -945,7 +968,8 @@ button {
 
 .detail-heading {
   display: grid;
-  gap: 6px;
+  gap: 8px;
+  padding: 2px 2px 0;
 }
 
 .detail-heading h3 {
@@ -965,6 +989,31 @@ button {
   background: rgba(255, 248, 236, 0.03);
   color: var(--text-dim);
   cursor: pointer;
+}
+
+.detail-link-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 11px 14px;
+  border: 1px solid rgba(208, 171, 103, 0.2);
+  border-radius: 10px;
+  background: rgba(208, 171, 103, 0.08);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.detail-link-button:hover {
+  border-color: rgba(208, 171, 103, 0.34);
+  background: rgba(208, 171, 103, 0.12);
+}
+
+.detail-link-button svg {
+  flex-shrink: 0;
+  color: var(--gold);
 }
 
 .constraint-block {

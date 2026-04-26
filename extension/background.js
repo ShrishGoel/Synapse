@@ -33,6 +33,9 @@ async function pushSnapshotToBackend(entry) {
         url: entry.url,
         title: entry.title || "",
         dom: entry.dom,
+        readable_text: entry.readable?.textContent || "",
+        readable_html: entry.readable?.content || "",
+        readable_extractor: entry.readable?.extractor || "",
         timestamp: Math.floor((entry.timestamp || Date.now()) / 1000),
       }),
     });

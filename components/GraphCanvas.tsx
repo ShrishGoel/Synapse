@@ -304,7 +304,6 @@ function buildChips(rawData: Record<string, unknown>, metrics: ResearchMetric[],
     }
   }
 
-  chips.push(sourceType === "discovered" ? "AI found" : "Captured");
   return chips.slice(0, 4);
 }
 
@@ -374,6 +373,8 @@ function GraphCanvasInner({ initialNodes, initialEdges }: GraphCanvasProps) {
   const [renderStatus, setRenderStatus] = useState<string>("Idle");
   const requestSequenceRef = useRef(0);
   const didInitialLoadRef = useRef(false);
+  const promptInputRef = useRef<HTMLInputElement | null>(null);
+  const constraintInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     setGraph(initialNodes, initialEdges);
@@ -433,9 +434,14 @@ function GraphCanvasInner({ initialNodes, initialEdges }: GraphCanvasProps) {
         "seed",
       ).toLowerCase();
       const sourceType = sourceTypeRaw === "discovered" ? "discovered" : "seed";
+      const originKindRaw = stringifyValue(
+        backendData.originKind ?? getValue(rawData, ["originKind", "Origin Kind", "origin_kind"]),
+        sourceType === "discovered" ? "firecrawl" : "user",
+      ).toLowerCase();
+      const originKind = originKindRaw === "firecrawl" ? "firecrawl" : "user";
       const sourceLabel =
         stringifyValue(backendData.sourceLabel) ||
-        (url ? hostnameLabel(url) : stringifyValue(getValue(rawData, ["source", "Source", "Brand"]), sourceType === "discovered" ? "AI found" : "Captured"));
+        (url ? hostnameLabel(url) : stringifyValue(getValue(rawData, ["source", "Source", "Brand"]), originKind === "firecrawl" ? "AI found" : "Captured"));
       const locationLabel =
         stringifyValue(backendData.locationLabel) ||
         stringifyValue(
@@ -507,6 +513,7 @@ function GraphCanvasInner({ initialNodes, initialEdges }: GraphCanvasProps) {
           aiRank,
           aiReason,
           sourceType,
+          originKind,
           constraintViolated: Boolean(backendData.constraintViolated ?? getValue(rawData, ["constraintViolated", "Constraint Violated"])),
           constraintReason: stringifyValue(backendData.constraintReason ?? getValue(rawData, ["constraintReason", "Constraint Reason"]), ""),
           metrics: resolvedMetrics,
@@ -571,7 +578,7 @@ function GraphCanvasInner({ initialNodes, initialEdges }: GraphCanvasProps) {
             body: JSON.stringify({
               user_prompt: resolvedUserPrompt,
               user_constraint: constraint,
-              firecrawl_query_budget: 4,
+              firecrawl_query_budget: statsPayload.enable_discovery ? 4 : 0,
               max_tabs: 20,
             }),
           });
@@ -621,9 +628,12 @@ function GraphCanvasInner({ initialNodes, initialEdges }: GraphCanvasProps) {
     [getApiBases, normalizeGraphNodes, setGraph],
   );
 
-  const runSynthesis = useCallback(async () => {
-    const trimmed = constraintInput.trim();
-    const prompt = userPromptInput.trim() || "Graph the pages I have been looking at.";
+  const runSynthesis = useCallback(async (nextPrompt?: string, nextConstraint?: string) => {
+    const promptValue = nextPrompt ?? promptInputRef.current?.value ?? userPromptInput;
+    const constraintValue =
+      nextConstraint ?? constraintInputRef.current?.value ?? constraintInput;
+    const trimmed = constraintValue.trim();
+    const prompt = promptValue.trim() || "Graph the pages I have been looking at.";
 
     const requestId = ++requestSequenceRef.current;
     setIsApplyingConstraint(true);
@@ -645,6 +655,17 @@ function GraphCanvasInner({ initialNodes, initialEdges }: GraphCanvasProps) {
       }
     }
   }, [constraintInput, loadFromExtension, userPromptInput]);
+
+  const triggerSynthesis = useCallback(() => {
+    const nextPrompt = promptInputRef.current?.value ?? userPromptInput;
+    const nextConstraint = constraintInputRef.current?.value ?? constraintInput;
+    setUserPromptInput(nextPrompt);
+    setConstraintInput(nextConstraint);
+    runSynthesis(nextPrompt, nextConstraint).catch((error: unknown) => {
+      setIsApplyingConstraint(false);
+      setConstraintError(error instanceof Error ? error.message : "Constraint request failed");
+    });
+  }, [constraintInput, runSynthesis, userPromptInput]);
 
   useEffect(() => {
     if (initialNodes.length > 0 || didInitialLoadRef.current) {
@@ -795,36 +816,46 @@ function GraphCanvasInner({ initialNodes, initialEdges }: GraphCanvasProps) {
                 </div>
 
                 <div className="grid w-full gap-2 xl:grid-cols-[minmax(560px,1fr)_auto]">
-                  <form
+                  <div
                     className="flex flex-wrap items-center gap-2 rounded-[24px] border border-[#312e26] bg-[#211f19]/92 px-4 py-3"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      runSynthesis().catch((error: unknown) => {
-                        setIsApplyingConstraint(false);
-                        setConstraintError(error instanceof Error ? error.message : "Constraint request failed");
-                      });
-                    }}
                   >
                     <input
+                      ref={promptInputRef}
                       value={userPromptInput}
                       onChange={(event) => setUserPromptInput(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter" || event.nativeEvent.isComposing) {
+                          return;
+                        }
+                        event.preventDefault();
+                        triggerSynthesis();
+                      }}
                       placeholder="Graph the laptop coolers"
                       className="min-w-[240px] flex-1 rounded-2xl border border-[#353128] bg-[#15140f] px-4 py-3 text-sm text-[#f5f0e4] outline-none placeholder:text-[#7d7668]"
                     />
                     <input
+                      ref={constraintInputRef}
                       value={constraintInput}
                       onChange={(event) => setConstraintInput(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter" || event.nativeEvent.isComposing) {
+                          return;
+                        }
+                        event.preventDefault();
+                        triggerSynthesis();
+                      }}
                       placeholder="Optional AI constraint..."
                       className="min-w-[200px] flex-1 rounded-2xl border border-[#353128] bg-[#15140f] px-4 py-3 text-sm text-[#f5f0e4] outline-none placeholder:text-[#7d7668]"
                     />
                     <button
-                      type="submit"
+                      type="button"
+                      onClick={triggerSynthesis}
                       disabled={isApplyingConstraint}
                       className="rounded-2xl bg-[#e0b36b] px-5 py-3 text-sm font-medium text-[#241f16] transition-opacity disabled:opacity-60"
                     >
                       {isApplyingConstraint ? "Running..." : "Run"}
                     </button>
-                  </form>
+                  </div>
 
                   <label className="flex items-center justify-between gap-3 rounded-[22px] border border-[#312e26] bg-[#211f19]/92 px-4 py-3 text-sm text-[#e6dfd0]">
                     <span className="flex items-center gap-2 text-[#d5ccbc]">

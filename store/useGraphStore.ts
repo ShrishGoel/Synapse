@@ -29,6 +29,7 @@ export type ResearchNodeData = {
   aiRank: number;
   aiReason: string;
   sourceType: NodeSourceType;
+  originKind?: "user" | "firecrawl";
   constraintViolated: boolean;
   constraintReason: string;
   metrics?: ResearchMetric[];
