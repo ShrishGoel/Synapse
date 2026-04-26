@@ -21,6 +21,8 @@ const NODE_HEIGHT = 440;
 const NODE_GAP = 64;
 const BOARD_PADDING = 80;
 const BOARD_MAX_COLUMNS = 4;
+const SESSION_STORAGE_KEY = "synapseFrontendSession";
+const LAST_RUN_TOKEN_STORAGE_KEY = "synapseFrontendLastRunToken";
 const SORT_OPTIONS = [
   { value: "ai", label: "AI best choice" },
   { value: "price", label: "Price" },
@@ -448,24 +450,6 @@ async function fetchSession(query, constraint, enableDiscovery, previousSession)
   return response.json();
 }
 
-async function applyConstraintToSession(session, constraint) {
-  const response = await fetch(`${API_BASE}/api/v1/session/apply-constraint`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      session,
-      user_constraint: constraint || null,
-    }),
-  });
-
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || `Constraint update failed: ${response.status}`);
-  }
-
-  return response.json();
-}
-
 function LoadingOverlay({ message }) {
   return (
     <motion.div
@@ -672,6 +656,43 @@ export default function App() {
     typeof window === "undefined" ? 1280 : window.innerWidth,
   );
 
+  useEffect(() => {
+    try {
+      const storedSession = window.sessionStorage.getItem(SESSION_STORAGE_KEY);
+      if (!storedSession) {
+        return;
+      }
+
+      const parsed = JSON.parse(storedSession);
+      if (!parsed || typeof parsed !== "object") {
+        return;
+      }
+
+      setSession(parsed);
+      if (typeof parsed.query === "string" && parsed.query.trim()) {
+        setQuery(parsed.query);
+      }
+      if (typeof parsed.user_constraint === "string") {
+        setConstraint(parsed.user_constraint);
+      }
+    } catch (_) {
+      // Ignore invalid persisted state and start fresh.
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      if (!session) {
+        window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+        return;
+      }
+
+      window.sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+    } catch (_) {
+      // Best effort only.
+    }
+  }, [session]);
+
   const data = session;
   const nodeMap = useMemo(
     () => Object.fromEntries((data?.graph?.nodes || []).map((node) => [node.id, node])),
@@ -779,19 +800,12 @@ export default function App() {
     setError("");
 
     try {
-      const appliedConstraint = typeof session?.user_constraint === "string"
-        ? session.user_constraint.trim()
-        : "";
-
-      const shouldReuseSession =
-        Boolean(session) &&
-        typeof session.query === "string" &&
-        session.query.trim().toLowerCase() === resolvedQuery.toLowerCase() &&
-        appliedConstraint !== resolvedConstraint;
-
-      const payload = shouldReuseSession
-        ? await applyConstraintToSession(session, resolvedConstraint)
-        : await fetchSession(resolvedQuery, resolvedConstraint, nextEnableDiscovery, session);
+      const payload = await fetchSession(
+        resolvedQuery,
+        resolvedConstraint,
+        nextEnableDiscovery,
+        session,
+      );
 
       setSession(payload);
       setQuery(payload.query || resolvedQuery);
@@ -814,12 +828,34 @@ export default function App() {
     const prompt = params.get("prompt")?.trim() || DEFAULT_QUERY;
     const constraintParam = params.get("constraint")?.trim() || "";
     const discoveryParam = params.get("discover");
+    const runToken = params.get("run")?.trim() || "";
     const discoveryEnabled =
       discoveryParam == null ? true : !["0", "false", "off"].includes(discoveryParam.toLowerCase());
     setQuery(prompt);
     setConstraint(constraintParam);
     setEnableDiscovery(discoveryEnabled);
-    runQuery(prompt, constraintParam, discoveryEnabled);
+
+    if (!runToken) {
+      return;
+    }
+
+    try {
+      const lastRunToken = window.sessionStorage.getItem(LAST_RUN_TOKEN_STORAGE_KEY);
+      const hasStoredSession = Boolean(window.sessionStorage.getItem(SESSION_STORAGE_KEY));
+      if (lastRunToken === runToken && hasStoredSession) {
+        return;
+      }
+    } catch (_) {
+      // Fall through to the autorun if storage is unavailable.
+    }
+
+    runQuery(prompt, constraintParam, discoveryEnabled).finally(() => {
+      try {
+        window.sessionStorage.setItem(LAST_RUN_TOKEN_STORAGE_KEY, runToken);
+      } catch (_) {
+        // Best effort only.
+      }
+    });
   }, []);
 
   const baseDigestEntries = useMemo(() => {
@@ -1300,15 +1336,20 @@ export default function App() {
                     <div className="compare-corner">Compare</div>
 
                     {compareColumns.map(({ row, node }) => (
-                      <div
+                      <button
                         key={row.node_id}
-                        className={`compare-column-head${
-                          selected === row.node_id ? " is-active" : ""
-                        }`}
+                        type="button"
+                        className="compare-column-head"
+                        onClick={() =>
+                          setSelected((current) =>
+                            current === row.node_id ? null : row.node_id,
+                          )
+                        }
+                        aria-label={`Open details for ${node?.title || row.node_id}`}
                       >
                         <span className="compare-source">{node?.source || "Captured"}</span>
                         <strong>{node?.title || row.node_id}</strong>
-                      </div>
+                      </button>
                     ))}
 
                     {data.matrix.columns.map((column) => (
@@ -1326,14 +1367,13 @@ export default function App() {
                             <button
                               key={`${row.node_id}-${column.key}`}
                               type="button"
-                              className={`compare-cell${selected === row.node_id ? " is-active" : ""}${
-                                best ? " is-best" : ""
+                              className={`compare-cell${best ? " is-best" : ""
                               }${worst ? " is-worst" : ""}${
                                 isViolated(node) ? " is-flagged" : ""
                               }`}
                               onClick={() =>
-                                setSelected((prev) =>
-                                  prev === row.node_id ? null : row.node_id,
+                                setSelected((current) =>
+                                  current === row.node_id ? null : row.node_id,
                                 )
                               }
                             >

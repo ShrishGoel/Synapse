@@ -53,12 +53,12 @@ export function ResearchCard({ id, data, selected }: NodeProps<ResearchNodeData>
           boxShadow: isConstraintViolated ? "none" : auraGlow,
         }}
         className={cn(
-          "w-[248px] overflow-hidden rounded-[18px] border bg-[#26231d]/88 text-[#f1ece0] backdrop-blur-sm",
+          "flex h-[430px] w-[248px] flex-col overflow-hidden rounded-[18px] border bg-[#26231d]/88 text-[#f1ece0] backdrop-blur-sm",
           isConstraintViolated && "opacity-40 grayscale",
           isSelected && "ring-2 ring-[#e0b36b]/30",
         )}
       >
-        <CardHeader className="gap-2 p-3 pb-2">
+        <CardHeader className="shrink-0 gap-2 p-3 pb-2">
           <div className="flex items-start justify-between gap-2">
             <div className="flex min-w-0 items-start gap-2">
               {image ? (
@@ -73,10 +73,10 @@ export function ResearchCard({ id, data, selected }: NodeProps<ResearchNodeData>
               )}
               <div className="min-w-0">
                 <div className="truncate text-[10px] uppercase tracking-[0.12em] text-[#d7ad69]">{data.sourceLabel || "Source"}</div>
-                <CardTitle className="mt-1 line-clamp-2 whitespace-normal text-[15px] leading-5 text-[#f5f0e4]">
+                <CardTitle className="mt-1 line-clamp-2 break-words whitespace-normal text-[15px] leading-5 text-[#f5f0e4]">
                   {data.title}
                 </CardTitle>
-                <div className="mt-1 truncate text-[12px] text-[#b8ae9a]">{data.kindLabel || data.locationLabel}</div>
+                <div className="mt-1 line-clamp-2 break-words text-[12px] leading-4 text-[#b8ae9a]">{data.kindLabel || data.locationLabel}</div>
               </div>
             </div>
             <Badge variant="outline" className="shrink-0 rounded-full border-[#3f3a30] bg-[#2b281f] px-2 py-0.5 text-[10px] text-[#d2c8b8]">
@@ -85,10 +85,12 @@ export function ResearchCard({ id, data, selected }: NodeProps<ResearchNodeData>
           </div>
         </CardHeader>
 
-        <CardContent className="space-y-3 p-3 pt-1">
-          <p className="line-clamp-3 text-[12px] leading-5 text-[#c5bcaa]">{data.summary || data.aiReason || "No summary available yet."}</p>
+        <CardContent className="flex min-h-0 flex-1 flex-col gap-3 p-3 pt-1">
+          <p className="line-clamp-3 shrink-0 break-words text-[12px] leading-5 text-[#c5bcaa]">
+            {data.summary || data.aiReason || "No summary available yet."}
+          </p>
 
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid shrink-0 grid-cols-2 gap-2">
             {(data.metrics || []).slice(0, 4).map((metric) => (
               <div key={`${id}-${metric.label}`} className="min-w-0 rounded-xl border border-[#3a362d] bg-[#211f19] px-2 py-2">
                 <div className="truncate text-[9px] uppercase tracking-[0.1em] text-[#948872]">{metric.label}</div>
@@ -97,15 +99,17 @@ export function ResearchCard({ id, data, selected }: NodeProps<ResearchNodeData>
             ))}
           </div>
 
-          <div className="flex flex-wrap gap-2">
-            {(data.chips || []).slice(0, 3).map((chip) => (
-              <Badge key={`${id}-${chip}`} variant="outline" className="max-w-full truncate rounded-full border-[#3f3a30] bg-[#2b281f] px-2 py-1 text-[10px] text-[#ddd4c4]">
-                {chip}
-              </Badge>
-            ))}
+          <div className="min-h-0 flex-1 overflow-hidden">
+            <div className="flex flex-wrap gap-2">
+              {(data.chips || []).slice(0, 3).map((chip) => (
+                <Badge key={`${id}-${chip}`} variant="outline" className="max-w-full truncate rounded-full border-[#3f3a30] bg-[#2b281f] px-2 py-1 text-[10px] text-[#ddd4c4]">
+                  {chip}
+                </Badge>
+              ))}
+            </div>
           </div>
 
-          <div className="flex items-center justify-between gap-3 pt-1">
+          <div className="mt-auto flex items-center justify-between gap-3 pt-1">
             <a
               href={data.url}
               target="_blank"
@@ -121,8 +125,8 @@ export function ResearchCard({ id, data, selected }: NodeProps<ResearchNodeData>
           </div>
 
           {isConstraintViolated ? (
-            <div className="pt-1">
-              <Badge className="rounded-full border-[#8f4c4c] bg-[#542d2d] text-[#f1d1d1]">
+            <div className="shrink-0 pt-1">
+              <Badge className="max-w-full truncate rounded-full border-[#8f4c4c] bg-[#542d2d] text-[#f1d1d1]">
                 {data.constraintReason || "Constraint fail"}
               </Badge>
             </div>

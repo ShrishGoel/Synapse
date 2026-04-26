@@ -52,6 +52,10 @@ STRIP_BLOCK_RE = re.compile(
 )
 TAG_RE = re.compile(r"<[^>]+>")
 WHITESPACE_RE = re.compile(r"\s+")
+CURRENCY_SNIPPET_RE = re.compile(
+    r"(.{0,40}(?:list\s+price|price|sale|deal|with\s+prime|prime)\s*[:\-]?\s*\$\s*\d[\d,.]*(?:\.\d{2})?.{0,40}|.{0,24}\$\s*\d[\d,.]*(?:\.\d{2})?.{0,24})",
+    re.IGNORECASE,
+)
 
 
 def _normalize_text(value: str) -> str:
@@ -62,6 +66,18 @@ def _normalize_text(value: str) -> str:
 
 def _extract_semantic_text(html: str, max_chars: int) -> str:
     snippets: list[str] = []
+    seen: set[str] = set()
+
+    def add_snippet(value: str) -> None:
+        text = _normalize_text(value)
+        if not text:
+            return
+        normalized = text.lower()
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        snippets.append(text)
+
     patterns = [
         r"<title[^>]*>(.*?)</title>",
         r"<meta[^>]+name=[\"']description[\"'][^>]+content=[\"'](.*?)[\"'][^>]*>",
@@ -72,9 +88,11 @@ def _extract_semantic_text(html: str, max_chars: int) -> str:
     for pattern in patterns:
         matches = re.findall(pattern, html, flags=re.IGNORECASE | re.DOTALL)
         for match in matches:
-            text = _normalize_text(str(match))
-            if text:
-                snippets.append(text)
+            add_snippet(str(match))
+
+    plain_text = _normalize_text(html)
+    for match in CURRENCY_SNIPPET_RE.findall(plain_text):
+        add_snippet(match)
 
     joined = "\n".join(snippets)
     if len(joined) > max_chars:
@@ -160,6 +178,8 @@ def summarize_html(
                     "'customers also bought' sections. For marketplace or product pages, "
                     "identify the single primary product that the page is mainly about, "
                     "using title, h1, semantic metadata, and nearby product facts first. "
+                    "When a price is visible, extract the explicit dollar amount shown on "
+                    "the page as a fact instead of paraphrasing it semantically. "
                     "Return only valid JSON. No markdown. No commentary."
                 ),
             },
@@ -177,7 +197,10 @@ def summarize_html(
                     "- 'primary_subject_type' should be a short label such as product, listing, article, forum thread, review page, or comparison page.\n"
                     "- Keep key_points to 3-7 short strings.\n"
                     "- Keep entities and facts grounded in visible or semantic HTML "
-                    "text.\n\n"
+                    "text.\n"
+                    "- If a dollar-denominated price is present, include it in facts as "
+                    "the displayed dollar amount (for example '$96' or '$96.00') rather "
+                    "than qualitative rewrites like 'under $100' or 'typically >$50'.\n\n"
                     "Semantic text excerpt:\n"
                     f"{semantic_text}\n\n"
                     "HTML (cleaned and truncated for token safety):\n"

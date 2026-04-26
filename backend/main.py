@@ -1031,6 +1031,12 @@ async def _synthesize_graph(
             "Do not invent your own attribute labels. "
             "Do not stuff product specs, listing facts, or rankings into constraintReason. "
             "constraintReason is only for the user constraint result and must be empty when no user constraint is provided. "
+            "The user constraint is for evaluation only, not fact extraction. Never change factual fields to satisfy the constraint. "
+            "When the captured context shows a price in dollars, extract that displayed dollar amount as the price attribute/value. "
+            "Do not rewrite prices into semantic approximations or budget-friendly substitutes. "
+            "If the user constraint contains multiple clauses, priorities, preferences, or budget notes, evaluate all of them together. "
+            "Use constraintViolated=true when the item fails the combined constraint or clearly conflicts with the user's stated priorities. "
+            "Use constraintReason to briefly name the most important mismatch in plain language. "
             "Create meaningful edges between related products, concepts, tradeoffs, or evidence. Keep the user-provided seed items "
             "in the graph and add newly found items as additional nodes rather than replacing the seed set. "
             f"Use at most {MAX_SYNTHESIZED_GRAPH_NODES} total nodes and at most {MAX_SYNTHESIZED_GRAPH_EDGES} edges, "
@@ -1062,7 +1068,11 @@ async def _synthesize_graph(
             "id, type, title, url, sourceType, aiRank, aiReason, summary, constraintViolated, constraintReason, and attributes. "
             "Put the domain facts in attributes instead of embedding them into aiReason or constraintReason. "
             "Each attribute should be a short label/value pair. The label MUST EXACTLY match a string from the 'Rubric fields' list. "
+            "If price is present in the captured context, extract the displayed dollar amount directly. "
+            "Do not lower, round down, or otherwise alter the price to satisfy the user constraint. "
+            "When the user provides multiple constraints, priorities, or preferences in one string, read the whole string as the constraint to evaluate rather than applying only one rule. "
             "If a rubric field is missing from the item, you may omit it or set value to 'Unknown'. "
+            "Drop nodes that are too sparse to compare well. If more than 60% of the rubric fields would be missing or Unknown for an item, do not include that node. "
             "If review evidence exists, make sure at least one review-oriented rubric field is populated for that node. "
             "Keep all seed items and previous graph nodes, then choose only the most relevant discovered items if there are more candidates than the graph can hold."
         ),
@@ -1172,6 +1182,62 @@ def _parse_price_value(value: Any, fallback: float = 0) -> float:
         return plausible[0]
 
     return fallback
+
+
+def _price_text_implies_constraint_violation(value: Any, mode: str, threshold: float) -> bool:
+    if not isinstance(value, str):
+        return False
+
+    text = value.lower().replace(",", "").strip()
+    numbers = _extract_numeric_values(text)
+    if not numbers:
+        return False
+
+    first_number = numbers[0]
+    has_lower_bound_signal = bool(
+        re.search(r"(?:^|[\s:(])(?:>|>=|above|over|more than|greater than|from)\s*\$?\s*\d", text)
+    )
+    has_upper_bound_signal = bool(
+        re.search(r"(?:^|[\s:(])(?:<|<=|below|under|less than|up to|at most|no more than)\s*\$?\s*\d", text)
+    )
+
+    if mode == "max" and has_lower_bound_signal:
+        return first_number >= threshold
+    if mode == "min" and has_upper_bound_signal:
+        return first_number <= threshold
+    return False
+
+
+def _lookup_price_values(data: dict[str, Any]) -> list[Any]:
+    values: list[Any] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        marker = json.dumps(value, sort_keys=True, default=str) if isinstance(value, (dict, list)) else str(value)
+        if marker in seen or value in (None, ""):
+            return
+        seen.add(marker)
+        values.append(value)
+
+    preferred_keys = ["priceUsd", "Price USD", "Price", "Price Range"]
+    direct_value = _lookup_data_value(data, preferred_keys)
+    add(direct_value)
+
+    token_value = _lookup_data_value_by_label_tokens(data, ("price", "cost", "rent"))
+    add(token_value)
+    for key in ["summary", "oneSentenceSummary", "description", "aiReason"]:
+        add(data.get(key))
+
+    raw_data = data.get("rawData")
+    if isinstance(raw_data, dict):
+        raw_direct = _lookup_data_value(raw_data, preferred_keys)
+        add(raw_direct)
+        raw_token = _lookup_data_value_by_label_tokens(raw_data, ("price", "cost", "rent"))
+        add(raw_token)
+        for key in ["summary", "oneSentenceSummary", "description", "aiReason"]:
+            add(raw_data.get(key))
+
+    return values
 
 
 def _lookup_data_value(data: dict[str, Any], keys: list[str]) -> Any:
@@ -1450,10 +1516,11 @@ def _canonicalize_graph_for_frontend(graph: ReactFlowGraphData) -> ReactFlowGrap
         source_type = "discovered" if source_type == "discovered" else "seed"
         source_label = _hostname_label(url) if url else _stringify_data_value(_lookup_data_value(raw_data, ["Source", "source"]), "Captured")
         kind_label = _stringify_data_value(_lookup_data_value(raw_data, ["kind", "Kind", "type", "Type", "category", "Category"]), "Item")
-        price_usd = _parse_price_value(
-            _lookup_data_value(raw_data, ["priceUsd"])
-            or _lookup_data_value_by_label_tokens(raw_data, ("price", "cost", "rent"))
-        )
+        price_usd = 0.0
+        for price_candidate in _lookup_price_values(raw_data):
+            price_usd = _parse_price_value(price_candidate, 0)
+            if price_usd > 0:
+                break
         ai_rank = _parse_data_number(_lookup_data_value(raw_data, ["aiRank", "AI Rank", "rank"]), index + 1)
         combined_score = _parse_data_number(_lookup_data_value(raw_data, ["combinedScore", "Combined Score", "score"]), max(0, 100 - int(ai_rank) * 10))
         ai_reason = _stringify_data_value(_lookup_data_value(raw_data, ["aiReason", "AI Reason", "reason"]))
@@ -1501,6 +1568,102 @@ def _canonicalize_graph_for_frontend(graph: ReactFlowGraphData) -> ReactFlowGrap
         }
 
     return ReactFlowGraphData.model_validate(payload)
+
+
+def _is_inaccessible_or_low_info_summary(text: str) -> bool:
+    normalized = " ".join(text.lower().split())
+    if not normalized:
+        return True
+
+    inaccessible_patterns = [
+        r"\baccess denied\b",
+        r"\bsign in\b",
+        r"\blog in\b",
+        r"\bcaptcha\b",
+        r"\bverify you are human\b",
+        r"\btemporarily unavailable\b",
+        r"\bpage not found\b",
+        r"\b404\b",
+        r"\b503\b",
+        r"\bunavailable\b",
+        r"\bblocked\b",
+        r"\bforbidden\b",
+        r"\bunsupported browser\b",
+        r"\benable javascript\b",
+        r"\bsorry, something went wrong\b",
+        r"\bunable to summarize page\b",
+    ]
+    if any(re.search(pattern, normalized) for pattern in inaccessible_patterns):
+        return True
+
+    weak_summary_patterns = [
+        r"^title: .+ \| page type: unknown \| summary: .*$",
+    ]
+    if any(re.search(pattern, normalized) for pattern in weak_summary_patterns):
+        excerpt = normalized.split("| summary:", 1)[-1].strip()
+        if len(excerpt) < 80:
+            return True
+
+    return False
+
+
+def _node_has_minimum_evidence(node: ReactFlowNode) -> bool:
+    data = dict(node.data)
+    title = _stringify_data_value(data.get("title"))
+    summary = _stringify_data_value(data.get("summary"))
+    ai_reason = _stringify_data_value(data.get("aiReason"))
+    metrics = data.get("metrics") if isinstance(data.get("metrics"), list) else []
+    attributes = data.get("attributes") if isinstance(data.get("attributes"), list) else []
+    chips = data.get("chips") if isinstance(data.get("chips"), list) else []
+    has_price = any(_parse_price_value(candidate, 0) > 0 for candidate in _lookup_price_values(data))
+    has_metrics = any(
+        isinstance(metric, dict)
+        and _stringify_data_value(metric.get("label"))
+        and _stringify_data_value(metric.get("value"))
+        and _stringify_data_value(metric.get("value")) != "Unknown"
+        for metric in metrics
+    )
+    has_attributes = any(
+        isinstance(attribute, dict)
+        and _stringify_data_value(attribute.get("label"))
+        and _stringify_data_value(attribute.get("value"))
+        and _stringify_data_value(attribute.get("value")) != "Unknown"
+        for attribute in attributes
+    )
+    has_chips = any(isinstance(chip, str) and chip.strip() for chip in chips)
+    meaningful_text = max(len(summary), len(ai_reason))
+
+    if (summary and _is_inaccessible_or_low_info_summary(summary)) or (
+        ai_reason and _is_inaccessible_or_low_info_summary(ai_reason)
+    ):
+        return False
+
+    if re.fullmatch(r"Item \d+", title):
+        return False
+
+    return has_price or has_metrics or has_attributes or has_chips or meaningful_text >= 80
+
+
+def _node_missing_rubric_ratio(node: ReactFlowNode, rubric_fields: list[str]) -> float:
+    relevant_fields = [field for field in rubric_fields if isinstance(field, str) and field.strip()]
+    if not relevant_fields:
+        return 0.0
+
+    data = dict(node.data)
+    missing_count = 0
+    for field in relevant_fields:
+        value = ""
+        for attr in data.get("attributes", []):
+            if isinstance(attr, dict) and _normalize_data_key(attr.get("label", "")) == _normalize_data_key(field):
+                value = _stringify_data_value(attr.get("value"))
+                break
+        if not value:
+            value = _stringify_data_value(_lookup_data_value(data, [field, _normalize_data_key(field)]))
+
+        if not value or value == "Unknown":
+            missing_count += 1
+
+    return missing_count / len(relevant_fields)
 
 
 def _normalized_url_key(value: str) -> str:
@@ -1668,12 +1831,22 @@ def _apply_constraint_to_data_dict(data: dict[str, Any], user_constraint: str | 
         return next_data
 
     mode, threshold = price_constraint
-    price_value = _parse_price_value(_lookup_data_value(next_data, ["priceUsd", "Price USD", "Price", "Price Range"]), 0)
+    price_values = _lookup_price_values(next_data)
+    price_value = 0.0
+    semantic_violation = False
+    for candidate in price_values:
+        parsed_value = _parse_price_value(candidate, 0)
+        if parsed_value > 0 and price_value == 0:
+            price_value = parsed_value
+        if _price_text_implies_constraint_violation(candidate, mode, threshold):
+            semantic_violation = True
+
     violated = False
     if mode == "max" and price_value > 0:
         violated = price_value > threshold
     elif mode == "min" and price_value > 0:
         violated = price_value < threshold
+    violated = violated or semantic_violation
 
     if violated:
         existing_reason = _stringify_data_value(next_data.get("constraintReason"))
@@ -1976,11 +2149,10 @@ def _build_session_digest(query: str, domain: str, graph: ReactFlowGraphData) ->
 
 
 def _graph_to_unified_session(graph: ReactFlowGraphData, query: str, user_constraint: str | None = None) -> UnifiedSession:
-    constrained_graph = _apply_deterministic_constraints(graph, user_constraint)
     domain = graph.domain or "research"
-    session_graph = _build_session_graph(constrained_graph)
-    session_matrix = _build_session_matrix(query, domain, constrained_graph)
-    session_digest = _build_session_digest(query, domain, constrained_graph)
+    session_graph = _build_session_graph(graph)
+    session_matrix = _build_session_matrix(query, domain, graph)
+    session_digest = _build_session_digest(query, domain, graph)
     overall_status = "pending" if session_digest.stats.pending else "ready"
     theme_signals = list(session_digest.theme_signals)
     if user_constraint:
@@ -2002,64 +2174,11 @@ def _graph_to_unified_session(graph: ReactFlowGraphData, query: str, user_constr
 def _apply_constraint_to_session(session: UnifiedSession, user_constraint: str | None = None) -> UnifiedSession:
     next_session = session.model_copy(deep=True)
     normalized_constraint = (user_constraint or "").strip()
-    ready = flagged = 0
-
-    for node in next_session.graph.nodes:
-        metadata = _apply_constraint_to_data_dict(dict(node.metadata or {}), user_constraint)
-        node.metadata = metadata
-        node.status = _session_status_from_data(metadata)
-        node.subtitle = _session_subtitle_for_node(metadata)
-        if node.status == "flagged":
-            flagged += 1
-        else:
-            ready += 1
-
-    next_session.graph.nodes.sort(
-        key=lambda node: (
-            int(bool(node.metadata.get("constraintViolated"))),
-            _parse_data_number(node.metadata.get("aiRank"), 999),
-        )
-    )
-
-    node_map = {node.id: node for node in next_session.graph.nodes}
-    def _row_sort_key(row: SessionMatrixRow) -> tuple[int, float]:
-        node = node_map.get(row.node_id)
-        metadata = node.metadata if node else {}
-        return (
-            int(bool(metadata.get("constraintViolated"))),
-            _parse_data_number(metadata.get("aiRank"), 999),
-        )
-
-    next_session.matrix.rows.sort(key=_row_sort_key)
-
-    for entry in next_session.digest.entries:
-        node = node_map.get(entry.node_id)
-        if not node:
-            continue
-        if bool(node.metadata.get("constraintViolated")):
-            entry.source_note = "Constraint mismatch"
-            entry.relevance = max(0.05, entry.relevance * 0.55)
-        else:
-            entry.source_note = _stringify_data_value(node.metadata.get("sourceLabel"), "Captured")
-
-    next_session.digest.entries.sort(
-        key=lambda entry: (
-            int(bool(node_map.get(entry.node_id).metadata.get("constraintViolated"))) if node_map.get(entry.node_id) else 1,
-            -entry.relevance,
-        )
-    )
-    next_session.digest.stats = SessionDigestStats(
-        total=len(next_session.graph.nodes),
-        ready=ready,
-        extracting=0,
-        pending=flagged,
-    )
     theme_signals = [signal for signal in next_session.digest.theme_signals if not signal.startswith("constraint:")]
     if normalized_constraint:
         theme_signals.append(f"constraint: {normalized_constraint}")
     next_session.digest.theme_signals = theme_signals
     next_session.user_constraint = normalized_constraint
-    next_session.status = "pending" if flagged else "ready"
     return next_session
 
 
@@ -2156,10 +2275,9 @@ def _is_generic_listing_title(title: str) -> bool:
 
 
 def _filter_graph_for_prompt(graph: ReactFlowGraphData, user_prompt: str) -> ReactFlowGraphData:
-    """Remove generic listing/directory/homepage nodes that should never appear in the graph."""
-    from urllib.parse import urlparse
-
+    """Remove generic listing/directory/homepage or inaccessible/low-info nodes."""
     kept_nodes: list[ReactFlowNode] = []
+    rubric_fields = list(graph.rubric_fields or [])
     for node in graph.nodes:
         data = dict(node.data)
         title = str(data.get("title", "")).strip()
@@ -2172,6 +2290,21 @@ def _filter_graph_for_prompt(graph: ReactFlowGraphData, user_prompt: str) -> Rea
 
         if _is_generic_listing_url(url):
             logger.debug("Filtered out root/search URL node title=%r url=%r", title, url)
+            continue
+
+        if not _node_has_minimum_evidence(node):
+            logger.debug("Filtered out low-evidence or inaccessible node title=%r url=%r", title, url)
+            continue
+
+        missing_ratio = _node_missing_rubric_ratio(node, rubric_fields)
+        if rubric_fields and missing_ratio > 0.6:
+            logger.debug(
+                "Filtered out low-coverage node title=%r url=%r missing_ratio=%.2f rubric_fields=%s",
+                title,
+                url,
+                missing_ratio,
+                rubric_fields,
+            )
             continue
 
         kept_nodes.append(node)

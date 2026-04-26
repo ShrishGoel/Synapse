@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Edge, Node } from "reactflow";
 
@@ -61,6 +61,7 @@ function buildNode(
     title: "Rental",
     url: `https://example.com/${id}`,
     locationLabel: "Pasadena",
+    sourceLabel: "Captured",
     priceUsd: 1400,
     distanceMiles: 1,
     bedrooms: 1,
@@ -72,7 +73,8 @@ function buildNode(
     aiReason: "Best mix of price and distance.",
     sourceType: "seed" as const,
     constraintViolated: false,
-    constraintReason: ""
+    constraintReason: "",
+    metrics: [{ label: "Price", value: "$1,400" }]
   };
 
   return {
@@ -128,6 +130,8 @@ describe("GraphCanvas housing board", () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllGlobals();
+    window.history.replaceState({}, "", "/");
   });
 
   it("renders the correct number of housing cards", async () => {
@@ -192,5 +196,92 @@ describe("GraphCanvas housing board", () => {
 
     const link = await screen.findByRole("link", { name: /open 1030 e green st apt 11b listing/i });
     expect(link).toHaveAttribute("href", "https://example.com/green");
+  });
+
+  it("does not auto-run synthesis on page load", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    window.history.replaceState({}, "", "/?prompt=quiet+fans&constraint=under+50");
+
+    render(<GraphCanvas initialNodes={[]} initialEdges={[]} />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("quiet fans")).toBeInTheDocument();
+      expect(screen.getByDisplayValue("under 50")).toBeInTheDocument();
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("runs synthesis only after explicit submit", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          count: 2,
+          user_prompt: "quiet fans",
+          recent: [],
+          enable_discovery: false
+        })
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          nodes: [],
+          edges: []
+        })
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<GraphCanvas initialNodes={[]} initialEdges={[]} />);
+
+    fireEvent.change(screen.getByPlaceholderText(/graph the laptop coolers/i), {
+      target: { value: "quiet fans" }
+    });
+    fireEvent.change(screen.getByPlaceholderText(/optional ai constraint/i), {
+      target: { value: "under 50" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^run$/i }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it("tints compare columns red when a node violates the constraint", async () => {
+    render(
+      <GraphCanvas
+        initialNodes={[
+          buildNode("safe", {
+            title: "Safe option",
+            metrics: [{ label: "Price", value: "$1,200" }]
+          }),
+          buildNode("violating", {
+            title: "Violating option",
+            constraintViolated: true,
+            constraintReason: "Over budget",
+            metrics: [{ label: "Price", value: "$1,900" }]
+          })
+        ]}
+        initialEdges={[]}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /compare/i }));
+
+    const compareSection = screen.getByText("Compare").closest("section");
+    expect(compareSection).not.toBeNull();
+
+    const compareQueries = within(compareSection as HTMLElement);
+    const violatingHeader = await compareQueries.findByText("Violating option");
+    const safeHeader = compareQueries.getByText("Safe option");
+    const violatingValue = await compareQueries.findByText("$1,900");
+    const safeValue = compareQueries.getByText("$1,200");
+
+    expect(violatingHeader.parentElement).toHaveClass("bg-[#4a2424]/82", "border-[#7d3d3d]");
+    expect(violatingValue.closest("div")).toHaveClass("bg-[#4a2424]/82", "border-[#7d3d3d]");
+    expect(safeHeader.parentElement).not.toHaveClass("bg-[#4a2424]/82");
+    expect(safeValue.closest("div")).not.toHaveClass("bg-[#4a2424]/82");
   });
 });

@@ -4,6 +4,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 import main
+import summarizer
 
 
 def _dom_payload() -> dict:
@@ -75,6 +76,35 @@ async def test_synthesize_from_dom_calls_summarizer_then_synthesize() -> None:
     assert synthesize_payload.user_prompt == "Graph the laptop coolers I have been looking at."
     assert len(synthesize_payload.active_tabs) == 2
     assert "Facts: Price: $79.99" in synthesize_payload.active_tabs[0].summary
+
+
+@pytest.mark.asyncio
+async def test_synthesize_graph_prompt_keeps_price_extraction_separate_from_constraints() -> None:
+    structured = AsyncMock(
+        return_value=main.ReactFlowGraphData(
+            nodes=[],
+            edges=[],
+        )
+    )
+
+    with patch("main._structured_llm_call", structured):
+        await main._synthesize_graph(
+            user_prompt="Compare the laptop cooling pads",
+            user_constraint="under $50",
+            rubric=main.ComparisonRubric(
+                domain="products",
+                fields=["Price USD", "Cooling Performance", "Review Consensus"],
+                inferred_constraints=[],
+                default_ordering="best value first",
+                seed_patterns=[],
+            ),
+            context="Facts: Price: $96.00",
+        )
+
+    kwargs = structured.await_args.kwargs
+    assert "Never change factual fields to satisfy the constraint" in kwargs["system_prompt"]
+    assert "extract the displayed dollar amount directly" in kwargs["user_prompt"]
+    assert "multiple constraints" in kwargs["user_prompt"]
 
 
 @pytest.mark.asyncio
@@ -263,7 +293,7 @@ def test_apply_constraint_to_session_persists_user_constraint() -> None:
 
     assert updated.user_constraint == "under 50 dollars"
     assert any(signal == "constraint: under 50 dollars" for signal in updated.digest.theme_signals)
-    assert updated.graph.nodes[0].status == "flagged"
+    assert updated.graph.nodes[0].status == "ready"
 
 
 def test_drop_discovered_nodes_keeps_only_captured_seed_nodes() -> None:
@@ -432,6 +462,32 @@ def test_apply_constraint_to_data_dict_accepts_natural_budget_phrases() -> None:
     assert allowed["constraintViolated"] is False
     assert min_required["constraintViolated"] is True
     assert min_required["constraintReason"] == "Below minimum budget of $50"
+
+
+def test_apply_constraint_to_data_dict_respects_price_inequality_text() -> None:
+    above_threshold = main._apply_constraint_to_data_dict(
+        {
+            "Price": "Typically >$50",
+            "combinedScore": 90,
+            "constraintViolated": False,
+            "constraintReason": "",
+        },
+        "under $50",
+    )
+    below_threshold = main._apply_constraint_to_data_dict(
+        {
+            "Price": "Usually <$50",
+            "combinedScore": 90,
+            "constraintViolated": False,
+            "constraintReason": "",
+        },
+        "at least 50 dollars",
+    )
+
+    assert above_threshold["constraintViolated"] is True
+    assert above_threshold["constraintReason"] == "Above budget cap of $50"
+    assert below_threshold["constraintViolated"] is True
+    assert below_threshold["constraintReason"] == "Below minimum budget of $50"
 
 
 @pytest.mark.asyncio
@@ -632,3 +688,143 @@ def test_filter_graph_for_prompt_does_not_apply_domain_specific_pruning() -> Non
 
     assert len(filtered.nodes) == 1
     assert filtered.nodes[0].id == "concept-node"
+
+
+def test_filter_graph_for_prompt_drops_inaccessible_or_low_info_nodes() -> None:
+    graph = main.ReactFlowGraphData(
+        nodes=[
+            main.ReactFlowNode(
+                id="blocked-node",
+                type="research",
+                data={
+                    "title": "Amazon login wall",
+                    "url": "https://example.com/blocked",
+                    "summary": "Access denied. Sign in to continue.",
+                    "sourceType": "discovered",
+                    "constraintViolated": False,
+                    "constraintReason": "",
+                },
+                position=main.GraphPosition(x=0, y=0),
+            ),
+            main.ReactFlowNode(
+                id="good-node",
+                type="research",
+                data={
+                    "title": "Useful cooler",
+                    "url": "https://example.com/cooler",
+                    "summary": "Reliable cooling pad with clear specs and enough evidence to compare.",
+                    "Price": "$79.99",
+                    "sourceType": "seed",
+                    "constraintViolated": False,
+                    "constraintReason": "",
+                },
+                position=main.GraphPosition(x=320, y=0),
+            ),
+        ],
+        edges=[],
+    )
+
+    canonical = main._canonicalize_graph_for_frontend(graph)
+    filtered = main._filter_graph_for_prompt(canonical, "Compare laptop coolers")
+
+    assert [node.id for node in filtered.nodes] == ["good-node"]
+
+
+def test_filter_graph_for_prompt_drops_nodes_missing_most_rubric_fields() -> None:
+    graph = main.ReactFlowGraphData(
+        rubric_fields=["Price USD", "Review Consensus", "Cushioning Technology", "Stability Features", "Outsole Durability"],
+        nodes=[
+            main.ReactFlowNode(
+                id="sparse-node",
+                type="research",
+                data={
+                    "title": "Sparse shoe",
+                    "url": "https://example.com/sparse",
+                    "summary": "Has some detail but not enough structured comparison data.",
+                    "attributes": [
+                        {"label": "Price USD", "value": "$74.95"},
+                        {"label": "Review Consensus", "value": "Unknown"},
+                        {"label": "Cushioning Technology", "value": "Unknown"},
+                        {"label": "Stability Features", "value": "Unknown"},
+                        {"label": "Outsole Durability", "value": "Unknown"},
+                    ],
+                    "sourceType": "seed",
+                    "constraintViolated": False,
+                    "constraintReason": "",
+                },
+                position=main.GraphPosition(x=0, y=0),
+            ),
+            main.ReactFlowNode(
+                id="kept-node",
+                type="research",
+                data={
+                    "title": "Covered shoe",
+                    "url": "https://example.com/covered",
+                    "summary": "Well-covered shoe with enough comparable fields present to keep.",
+                    "attributes": [
+                        {"label": "Price USD", "value": "$89.95"},
+                        {"label": "Review Consensus", "value": "4.4/5 stars from 2,666 reviews"},
+                        {"label": "Cushioning Technology", "value": "GEL technology"},
+                        {"label": "Stability Features", "value": "TRUSSTIC technology"},
+                        {"label": "Outsole Durability", "value": "Synthetic leather toe overlays"},
+                    ],
+                    "sourceType": "seed",
+                    "constraintViolated": False,
+                    "constraintReason": "",
+                },
+                position=main.GraphPosition(x=320, y=0),
+            ),
+        ],
+        edges=[],
+    )
+
+    filtered = main._filter_graph_for_prompt(graph, "Compare tennis shoes")
+
+    assert [node.id for node in filtered.nodes] == ["kept-node"]
+
+
+def test_canonicalize_graph_for_frontend_extracts_price_from_summary_text() -> None:
+    graph = main.ReactFlowGraphData(
+        nodes=[
+            main.ReactFlowNode(
+                id="summary-price-node",
+                type="research",
+                data={
+                    "title": "llano V12 Gaming Laptop Cooling Pad",
+                    "url": "https://www.amazon.com/dp/B0EXAMPLE96",
+                    "summary": "Title: llano V12 | Facts: Price: $96.00 | Cooling performance is strong.",
+                    "sourceType": "seed",
+                    "constraintViolated": False,
+                    "constraintReason": "",
+                },
+                position=main.GraphPosition(x=0, y=0),
+            )
+        ],
+        edges=[],
+    )
+
+    canonical = main._canonicalize_graph_for_frontend(graph)
+
+    assert canonical.nodes[0].data.priceUsd == 96.0
+
+
+def test_extract_semantic_text_includes_span_based_amazon_price() -> None:
+    html = """
+    <html>
+      <head><title>ASICS Men's Gel-Dedicate 8 Tennis Shoes</title></head>
+      <body>
+        <h1>ASICS Men's Gel-Dedicate 8 Tennis Shoes</h1>
+        <div id="corePriceDisplay_desktop_feature_div">
+          <span class="a-price aok-align-center">
+            <span class="a-offscreen">$74.95</span>
+            <span aria-hidden="true"><span class="a-price-symbol">$</span><span class="a-price-whole">74</span><span class="a-price-decimal">.</span><span class="a-price-fraction">95</span></span>
+          </span>
+        </div>
+      </body>
+    </html>
+    """
+
+    semantic_text = summarizer._extract_semantic_text(html, 5000)
+
+    assert "ASICS Men's Gel-Dedicate 8 Tennis Shoes" in semantic_text
+    assert "$74.95" in semantic_text

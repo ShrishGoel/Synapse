@@ -303,13 +303,6 @@ promptInput.addEventListener("input", () => {
   shouldClearPromptOnFocus = false;
 });
 
-document.querySelectorAll(".hint-chip").forEach((chip) => {
-  chip.addEventListener("click", () => {
-    setPromptValue(chip.textContent, { clearOnFocus: false });
-    promptInput.focus();
-  });
-});
-
 clearButton.addEventListener("click", async () => {
   clearButton.disabled = true;
 

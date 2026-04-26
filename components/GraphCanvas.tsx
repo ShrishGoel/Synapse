@@ -39,6 +39,18 @@ type CompareRow = {
   values: string[];
 };
 
+function compareColumnClassName(isConstraintViolated: boolean, isTrailingColumn: boolean) {
+  if (isConstraintViolated) {
+    return "border-[#7d3d3d] bg-[#4a2424]/82";
+  }
+
+  if (isTrailingColumn) {
+    return "border-[#6c5441] bg-[#3a2f27]/85";
+  }
+
+  return "border-[#3a362d] bg-[#2b2923]";
+}
+
 const EXCLUDED_COMPARE_KEYS = new Set([
   "title",
   "url",
@@ -372,7 +384,6 @@ function GraphCanvasInner({ initialNodes, initialEdges }: GraphCanvasProps) {
   const [viewMode, setViewMode] = useState<WorkspaceView>("board");
   const [renderStatus, setRenderStatus] = useState<string>("Idle");
   const requestSequenceRef = useRef(0);
-  const didInitialLoadRef = useRef(false);
   const promptInputRef = useRef<HTMLInputElement | null>(null);
   const constraintInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -668,34 +679,21 @@ function GraphCanvasInner({ initialNodes, initialEdges }: GraphCanvasProps) {
   }, [constraintInput, runSynthesis, userPromptInput]);
 
   useEffect(() => {
-    if (initialNodes.length > 0 || didInitialLoadRef.current) {
+    if (typeof window === "undefined") {
       return;
     }
 
-    didInitialLoadRef.current = true;
-    setConstraintError(null);
     const query = new URLSearchParams(window.location.search);
     const promptFromQuery = query.get("prompt")?.trim() || "";
-    const constraintFromQuery = query.get("constraint")?.trim() || null;
+    const constraintFromQuery = query.get("constraint")?.trim() || "";
+
     if (promptFromQuery) {
       setUserPromptInput(promptFromQuery);
     }
-    setIsApplyingConstraint(true);
-    setRenderStatus("Rendering graph...");
-    const requestId = ++requestSequenceRef.current;
-    loadFromExtension(constraintFromQuery, promptFromQuery)
-      .catch((error: unknown) => {
-        if (requestId !== requestSequenceRef.current) {
-          return;
-        }
-        setConstraintError(error instanceof Error ? error.message : "Failed to load extension history");
-      })
-      .finally(() => {
-        if (requestId === requestSequenceRef.current) {
-          setIsApplyingConstraint(false);
-        }
-      });
-  }, [initialNodes.length, loadFromExtension]);
+    if (constraintFromQuery) {
+      setConstraintInput(constraintFromQuery);
+    }
+  }, []);
 
   const topAiPick = useMemo(() => {
     if (nodes.length === 0) {
@@ -1001,15 +999,25 @@ function GraphCanvasInner({ initialNodes, initialEdges }: GraphCanvasProps) {
                   <div className="sticky left-0 z-10 rounded-[22px] border border-[#3a362d] bg-[#2b2923] px-4 py-5 text-[17px] text-[#bcb2a1]">
                     Compare
                   </div>
-                  {nodes.map((node) => (
-                    <div key={node.id} className="rounded-[22px] border border-[#3a362d] bg-[#2b2923] px-4 py-4">
+                  {nodes.map((node, index) => (
+                    <div
+                      key={node.id}
+                      className={cn(
+                        "rounded-[22px] border px-4 py-4",
+                        compareColumnClassName(Boolean(node.data.constraintViolated), index === nodes.length - 1),
+                      )}
+                    >
                       <div className="text-xs uppercase tracking-[0.18em] text-[#d4ac66]">{node.data.sourceLabel}</div>
                       <div className="mt-6 text-[18px] font-semibold text-[#f0e9dc]">{node.data.title}</div>
                     </div>
                   ))}
 
                   {compareRows.map((row, rowIndex) => (
-                    <FragmentCompareRow key={`${row.label}-${rowIndex}`} row={row} />
+                    <FragmentCompareRow
+                      key={`${row.label}-${rowIndex}`}
+                      row={row}
+                      violatedColumns={nodes.map((node) => Boolean(node.data.constraintViolated))}
+                    />
                   ))}
                 </div>
               </section>
@@ -1036,7 +1044,7 @@ function GraphCanvasInner({ initialNodes, initialEdges }: GraphCanvasProps) {
   );
 }
 
-function FragmentCompareRow({ row }: { row: CompareRow }) {
+function FragmentCompareRow({ row, violatedColumns }: { row: CompareRow; violatedColumns: boolean[] }) {
   return (
     <>
       <div className="sticky left-0 z-10 rounded-[22px] border border-[#3a362d] bg-[#2b2923] px-4 py-5 text-[17px] text-[#bcb2a1]">
@@ -1047,9 +1055,7 @@ function FragmentCompareRow({ row }: { row: CompareRow }) {
           key={`${row.label}-${index}`}
           className={cn(
             "rounded-[22px] border px-4 py-5 text-[17px] text-[#efe8db]",
-            index === row.values.length - 1
-              ? "border-[#6c5441] bg-[#3a2f27]/85"
-              : "border-[#3a362d] bg-[#2b2923]",
+            compareColumnClassName(Boolean(violatedColumns[index]), index === row.values.length - 1),
           )}
         >
           {value || "Unknown"}
