@@ -343,7 +343,7 @@ class SynthesizedNode(StrictModel):
     sourceType: Literal["seed", "discovered"]
     aiRank: float
     aiReason: str = Field(min_length=1, max_length=700)
-    summary: str = Field(min_length=1, max_length=900)
+    summary: str = Field(min_length=1, max_length=200)
     constraintViolated: bool
     constraintReason: str = Field(max_length=120)
     attributes: list[SynthesizedAttribute] = Field(default_factory=list, max_length=18)
@@ -1035,10 +1035,15 @@ async def _synthesize_graph(
             "in the graph and add newly found items as additional nodes rather than replacing the seed set. "
             f"Use at most {MAX_SYNTHESIZED_GRAPH_NODES} total nodes and at most {MAX_SYNTHESIZED_GRAPH_EDGES} edges, "
             "keeping all seed items and filling the remaining capacity with the strongest discovered items only. "
-            "CRITICAL: NEVER create nodes for search directories, aggregators, or listicles (e.g., 'Arcadia Rental Search'). "
-            "ONLY create nodes for INDIVIDUAL items being researched (e.g., a specific apartment, a specific product). "
+            "CRITICAL: NEVER create nodes for search directories, aggregators, listicles, homepages, or category browsing pages. "
+            "NEVER create nodes for pages like 'Amazon.com : laptops' or 'Amazon.com. Spend less. Smile more.' or any "
+            "marketplace search results page. "
+            "ONLY create nodes for INDIVIDUAL, SPECIFIC items being researched (e.g., a specific laptop model like 'HP Pavilion 15-eg2000', a specific product listing). "
+            "If a seed tab is a search/listing page, extract the INDIVIDUAL products mentioned in it instead of creating a node for the listing page itself. "
             f"Keep each url under {MAX_SYNTHESIZED_URL_CHARS} characters and prefer canonical URLs without tracking, checkout, "
             "affiliate, or session parameters. sourceType is either seed or discovered. "
+            "CRITICAL: Each summary must be ONE concise sentence (under 120 characters) describing the specific item. "
+            "Do NOT include page metadata, page types, key points lists, or entity lists in the summary. "
             "When external review context is present, express those findings through the rubric-field attributes "
             "instead of inventing extra labels, distinguish owner/reviewer sentiment from seller claims, and cite "
             "recent internet listing or discussion signals when possible. Prioritize review evidence and tradeoff "
@@ -1452,11 +1457,20 @@ def _canonicalize_graph_for_frontend(graph: ReactFlowGraphData) -> ReactFlowGrap
         ai_rank = _parse_data_number(_lookup_data_value(raw_data, ["aiRank", "AI Rank", "rank"]), index + 1)
         combined_score = _parse_data_number(_lookup_data_value(raw_data, ["combinedScore", "Combined Score", "score"]), max(0, 100 - int(ai_rank) * 10))
         ai_reason = _stringify_data_value(_lookup_data_value(raw_data, ["aiReason", "AI Reason", "reason"]))
-        summary = (
+        raw_summary = (
             _stringify_data_value(_lookup_data_value(raw_data, ["summary", "oneSentenceSummary", "description"]))
             or ai_reason
             or f"{title} is part of the current workspace graph."
         )
+        # Cap summary length — keep it to one concise sentence
+        if len(raw_summary) > 150:
+            # Try to break at the end of the first sentence
+            first_period = raw_summary.find(".", 0, 150)
+            if first_period > 30:
+                raw_summary = raw_summary[: first_period + 1]
+            else:
+                raw_summary = raw_summary[:147].rsplit(" ", 1)[0] + "..."
+        summary = raw_summary
         status_label = _stringify_data_value(_lookup_data_value(raw_data, ["status", "Status"])) or ("enriched" if source_type == "discovered" else "captured")
         attributes_list = raw_data.get("attributes")
         if isinstance(attributes_list, list) and len(attributes_list) > 0:
@@ -2108,8 +2122,72 @@ def _review_search_queries(active_tabs: list[ActiveTab], user_prompt: str, budge
     return _sanitize_search_queries(candidates, budget)
 
 
+def _is_generic_listing_url(url: str) -> bool:
+    """Return True if the URL looks like a marketplace homepage or search/listing page."""
+    from urllib.parse import urlparse
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+        path = parsed.path.rstrip("/")
+        if not path or path in ("/s", "/search", "/b", "/browse"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _is_generic_listing_title(title: str) -> bool:
+    """Return True if the title looks like a marketplace/listing page, not a specific product."""
+    GENERIC_TITLE_PATTERNS = [
+        r"^amazon\.com\b",
+        r"^walmart\.com\b",
+        r"^ebay\.com\b",
+        r"^best\s*buy\b",
+        r"^target\.com\b",
+        r"^newegg\.com\b",
+        r"spend less\.?\s*smile more",
+        r"page\s*type:\s*(listing|search|category|directory|marketplace)",
+        r"search results page",
+        r"over \d+[,.]?\d* results",
+        r"^[\w.]+\.com\s*:\s*\w",  # e.g. "Amazon.com : laptops"
+    ]
+    return bool(re.search("|".join(GENERIC_TITLE_PATTERNS), title, re.IGNORECASE))
+
+
 def _filter_graph_for_prompt(graph: ReactFlowGraphData, user_prompt: str) -> ReactFlowGraphData:
-    return graph
+    """Remove generic listing/directory/homepage nodes that should never appear in the graph."""
+    from urllib.parse import urlparse
+
+    kept_nodes: list[ReactFlowNode] = []
+    for node in graph.nodes:
+        data = dict(node.data)
+        title = str(data.get("title", "")).strip()
+        summary = str(data.get("summary", "")).strip()
+        url = str(data.get("url", "")).strip()
+
+        if _is_generic_listing_title(title) or _is_generic_listing_title(summary):
+            logger.debug("Filtered out generic node title=%r url=%r", title, url)
+            continue
+
+        if _is_generic_listing_url(url):
+            logger.debug("Filtered out root/search URL node title=%r url=%r", title, url)
+            continue
+
+        kept_nodes.append(node)
+
+    if not kept_nodes:
+        # Safety: don't return an empty graph
+        return graph
+
+    kept_ids = {n.id for n in kept_nodes}
+    kept_edges = [e for e in graph.edges if e.source in kept_ids and e.target in kept_ids]
+    return ReactFlowGraphData(
+        domain=graph.domain,
+        rubric_fields=list(graph.rubric_fields),
+        nodes=kept_nodes,
+        edges=kept_edges,
+    )
 
 
 @app.get("/health")
@@ -2289,6 +2367,15 @@ async def synthesize(payload: SynthesizeRequest) -> ReactFlowGraphData:
             previous_graph=payload.previous_graph,
         )
         logger.debug("Raw graph snapshot=%s", _debug_json(_graph_debug_payload(raw_graph)))
+        # Filter generic listing/homepage tabs from the active_tabs before they become seed nodes
+        clean_tabs = [
+            tab for tab in payload.active_tabs
+            if not _is_generic_listing_url(str(tab.url))
+            and not _is_generic_listing_title(str(getattr(tab, 'summary', '')))
+        ]
+        if not clean_tabs:
+            clean_tabs = payload.active_tabs  # safety: don't pass empty
+
         filtered_graph = _filter_graph_for_prompt(raw_graph, payload.user_prompt)
         if len(filtered_graph.nodes) != len(raw_graph.nodes):
             logger.debug(
@@ -2296,13 +2383,17 @@ async def synthesize(payload: SynthesizeRequest) -> ReactFlowGraphData:
                 len(raw_graph.nodes),
                 len(filtered_graph.nodes),
             )
-        filtered_graph = _ensure_seed_nodes_present(filtered_graph, payload.active_tabs)
+        filtered_graph = _ensure_seed_nodes_present(filtered_graph, clean_tabs)
         graph = _canonicalize_graph_for_frontend(filtered_graph)
-        graph = _reconcile_seed_nodes(graph, payload.active_tabs)
+        graph = _reconcile_seed_nodes(graph, clean_tabs)
         if not effective_discovery:
             graph = _drop_discovered_nodes(graph)
         graph.domain = rubric.domain
         graph.rubric_fields = rubric.fields
+
+        # Final safety pass: filter again after canonicalization to catch anything re-added
+        graph = _filter_graph_for_prompt(graph, payload.user_prompt)
+
         logger.debug("Canonical graph snapshot=%s", _debug_json(_graph_debug_payload(graph)))
         placeholder_like_nodes = [
             node.id

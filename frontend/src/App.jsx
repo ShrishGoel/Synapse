@@ -1164,6 +1164,12 @@ export default function App() {
                     </div>
 
                     <svg className="board-lines" aria-hidden="true">
+                      <defs>
+                        <filter id="board-glow" x="-50%" y="-50%" width="200%" height="200%">
+                          <feGaussianBlur stdDeviation="3" result="blur" />
+                          <feComposite in="SourceGraphic" in2="blur" operator="over" />
+                        </filter>
+                      </defs>
                       {visibleEdges.map((edge) => {
                         const from = positions[edge.from];
                         const to = positions[edge.to];
@@ -1171,17 +1177,33 @@ export default function App() {
                           return null;
                         }
 
+                        const clr = EDGE_CLR[edge.label] || EDGE_CLR.related_to;
                         return (
-                          <line
-                            key={edge.id}
-                            x1={from.x + NODE_WIDTH / 2}
-                            y1={from.y + NODE_HEIGHT / 2}
-                            x2={to.x + NODE_WIDTH / 2}
-                            y2={to.y + NODE_HEIGHT / 2}
-                            stroke={EDGE_CLR[edge.label] || EDGE_CLR.related_to}
-                            strokeWidth={edge.label === "mentions" ? 1.6 : 1}
-                            strokeDasharray={edge.label === "enriches" ? "5 5" : "none"}
-                          />
+                          <Fragment key={edge.id}>
+                            <line
+                              x1={from.x + NODE_WIDTH / 2}
+                              y1={from.y + NODE_HEIGHT / 2}
+                              x2={to.x + NODE_WIDTH / 2}
+                              y2={to.y + NODE_HEIGHT / 2}
+                              stroke={clr}
+                              strokeWidth={edge.label === "mentions" ? 2 : 1.2}
+                              strokeDasharray={edge.label === "enriches" ? "6 6" : "none"}
+                              strokeLinecap="round"
+                              strokeOpacity={0.6}
+                            />
+                            <line
+                              x1={from.x + NODE_WIDTH / 2}
+                              y1={from.y + NODE_HEIGHT / 2}
+                              x2={to.x + NODE_WIDTH / 2}
+                              y2={to.y + NODE_HEIGHT / 2}
+                              stroke={clr}
+                              strokeWidth={edge.label === "mentions" ? 6 : 4}
+                              strokeDasharray={edge.label === "enriches" ? "6 6" : "none"}
+                              strokeLinecap="round"
+                              strokeOpacity={0.08}
+                              filter="url(#board-glow)"
+                            />
+                          </Fragment>
                         );
                       })}
                     </svg>
