@@ -527,6 +527,43 @@ async def test_synthesize_disables_firecrawl_when_discovery_is_off() -> None:
     firecrawl_mock.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_synthesize_adds_similarity_intent_when_discovery_is_on() -> None:
+    payload = main.SynthesizeRequest(
+        user_prompt="Compare the tennis shoes I viewed",
+        firecrawl_query_budget=0,
+        enable_discovery=True,
+        active_tabs=[
+            main.ActiveTab(
+                url="https://example.com/shoe-a",
+                summary="Tennis shoe A for $79",
+            )
+        ],
+    )
+
+    build_rubric_mock = AsyncMock(return_value=main.ComparisonRubric(
+        domain="products",
+        fields=["Price USD", "Stability"],
+        inferred_constraints=[],
+        default_ordering="best overall first",
+        seed_patterns=[],
+    ))
+    synthesize_graph_mock = AsyncMock(return_value=_pipeline_graph())
+
+    with (
+        patch("main._build_rubric", build_rubric_mock),
+        patch("main._synthesize_graph", synthesize_graph_mock),
+    ):
+        await main.synthesize(payload)
+
+    rubric_payload = build_rubric_mock.await_args.args[0]
+    synthesize_prompt = synthesize_graph_mock.await_args.kwargs["user_prompt"]
+
+    assert rubric_payload.user_prompt.endswith("The user wants to find more similar products.")
+    assert "find more similar products" in synthesize_prompt.lower()
+    assert payload.user_prompt == "Compare the tennis shoes I viewed"
+
+
 def test_session_metadata_uses_metrics_and_raw_llm_fields() -> None:
     metadata = main._session_metadata_for_node(
         {

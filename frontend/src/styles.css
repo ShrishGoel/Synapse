@@ -536,7 +536,13 @@ button {
   padding: 0;
   border: 0;
   outline: none;
-  background: transparent;
+  background: rgba(255, 248, 236, 0.03);
+  color: var(--text);
+  color-scheme: dark;
+}
+
+.sort-control select option {
+  background: #26211a;
   color: var(--text);
 }
 

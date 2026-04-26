@@ -24,6 +24,129 @@
     return "";
   }
 
+  function rawTextFromSelectors(selectors, root = document) {
+    for (const selector of selectors) {
+      const element = root.querySelector(selector);
+      if (!(element instanceof Element)) {
+        continue;
+      }
+      const text = normalizeWhitespace(element.textContent || element.getAttribute?.("aria-label") || "");
+      if (text) {
+        return text;
+      }
+    }
+    return "";
+  }
+
+  function normalizePriceText(text, { allowPlainNumber = false } = {}) {
+    const normalized = normalizeWhitespace(text);
+    if (!normalized) {
+      return "";
+    }
+    const currencyMatch = normalized.match(/([$€£]\s*\d[\d,]*(?:\.\d{2})?)/);
+    if (currencyMatch) {
+      return currencyMatch[1];
+    }
+    const codeMatch = normalized.match(/(\d[\d,]*(?:\.\d{2})?)\s*(usd|eur|gbp|dollars?|euros?|pounds?)/i);
+    if (codeMatch) {
+      const amount = codeMatch[1];
+      const code = codeMatch[2].toUpperCase();
+      return `${amount} ${code}`;
+    }
+    if (allowPlainNumber) {
+      const plainMatch = normalized.match(/\b(\d{1,4}(?:[.,]\d{2})?)\b/);
+      if (plainMatch) {
+        return plainMatch[1];
+      }
+    }
+    return "";
+  }
+
+  function extractPriceFromElement(element) {
+    if (!(element instanceof Element)) {
+      return "";
+    }
+
+    const directCandidates = [
+      element.getAttribute("content") || "",
+      element.getAttribute("value") || "",
+      element.getAttribute("aria-label") || "",
+      element.textContent || "",
+    ];
+    for (const candidate of directCandidates) {
+      const price = normalizePriceText(candidate, { allowPlainNumber: element.matches("meta, [itemprop='price']") });
+      if (price) {
+        return price;
+      }
+    }
+
+    const whole = rawTextFromSelectors(
+      [
+        "[class*='price-whole' i]",
+        "[class*='a-price-whole' i]",
+        "[data-a-color='price'] [class*='whole' i]",
+      ],
+      element,
+    );
+    const fraction = rawTextFromSelectors(
+      [
+        "[class*='price-fraction' i]",
+        "[class*='a-price-fraction' i]",
+        "[data-a-color='price'] [class*='fraction' i]",
+      ],
+      element,
+    );
+    if (whole) {
+      const cleanedWhole = whole.replace(/[^\d,]/g, "");
+      const cleanedFraction = (fraction || "00").replace(/[^\d]/g, "").slice(0, 2) || "00";
+      if (cleanedWhole) {
+        return `$${cleanedWhole}.${cleanedFraction.padEnd(2, "0")}`;
+      }
+    }
+
+    return "";
+  }
+
+  function extractPagePrice(root = document) {
+    const explicitSelectors = [
+      "meta[itemprop='price']",
+      "meta[property='product:price:amount']",
+      "meta[name='twitter:data1']",
+      "[itemprop='price']",
+      "[data-price]",
+      "[data-price-amount]",
+      "[data-testid*='price' i]",
+      "[class*='priceToPay' i]",
+      "[class*='price' i]",
+      "[id*='price' i]",
+      "[aria-label*='$']",
+      "[aria-label*='price' i]",
+    ];
+
+    for (const selector of explicitSelectors) {
+      const elements = root.querySelectorAll(selector);
+      for (const element of elements) {
+        if (!element.matches("meta") && !isVisible(element)) {
+          continue;
+        }
+        const price = extractPriceFromElement(element);
+        if (price) {
+          return price;
+        }
+      }
+    }
+
+    const labeledText = rawTextFromSelectors(
+      [
+        "[class*='price' i]",
+        "[id*='price' i]",
+        "[data-testid*='price' i]",
+      ],
+      root,
+    );
+    return normalizePriceText(labeledText);
+  }
+
   function collectTexts(selector, root = document, maxCount = 8, minLength = 8) {
     const values = [];
     const seen = new Set();
@@ -140,18 +263,7 @@
     }
 
     const lines = [`Title: ${title}`];
-    const price = textFromSelectors(
-      [
-        "#corePrice_feature_div .a-offscreen",
-        "#corePriceDisplay_desktop_feature_div .a-offscreen",
-        "#apex_desktop .a-offscreen",
-        "#priceblock_ourprice",
-        "#priceblock_dealprice",
-        "#price_inside_buybox",
-        ".priceToPay .a-offscreen",
-      ],
-      document,
-    );
+    const price = extractPagePrice(document);
     if (price) {
       lines.push(`Price: ${price}`);
     }
@@ -260,6 +372,11 @@
 
     if (description) {
       metadata.push(`Description: ${description}`);
+    }
+
+    const price = extractPagePrice(root);
+    if (price) {
+      metadata.push(`Price: ${price}`);
     }
 
     root.querySelectorAll("h1, h2, h3").forEach((element) => {

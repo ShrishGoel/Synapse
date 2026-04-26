@@ -553,6 +553,16 @@ def _prompt_keywords(user_prompt: str) -> list[str]:
     return keywords[:12]
 
 
+def _prompt_with_discovery_intent(user_prompt: str, enable_discovery: bool) -> str:
+    if not enable_discovery:
+        return user_prompt
+
+    normalized = " ".join(user_prompt.lower().split())
+    if "find more similar products" in normalized or "find similar products" in normalized:
+        return user_prompt
+    return f"{user_prompt.rstrip()} The user wants to find more similar products."
+
+
 def _entry_relevance_score(entry: dict[str, Any], user_prompt: str) -> int:
     title = str(entry.get("title", "")).lower()
     url = str(entry.get("url", "")).lower()
@@ -2403,6 +2413,8 @@ async def synthesize(payload: SynthesizeRequest) -> ReactFlowGraphData:
             if payload.enable_discovery is not None
             else _should_investigate_further(payload.user_prompt)
         )
+        effective_user_prompt = _prompt_with_discovery_intent(payload.user_prompt, effective_discovery)
+        effective_payload = payload.model_copy(update={"user_prompt": effective_user_prompt})
         effective_query_budget = payload.firecrawl_query_budget if effective_discovery else 0
         logger.debug(
             "Synthesize start prompt=%r constraint=%r active_tabs=%s budget=%s discovery=%s",
@@ -2420,11 +2432,11 @@ async def synthesize(payload: SynthesizeRequest) -> ReactFlowGraphData:
         query_budget_remaining = effective_query_budget
         allow_discovery = effective_discovery and query_budget_remaining > 0
 
-        rubric = await _build_rubric(payload, context)
+        rubric = await _build_rubric(effective_payload, context)
         logger.debug("Generated rubric fields=%s", rubric.fields)
         logger.debug("Inferred constraints=%s seed_patterns=%s", rubric.inferred_constraints, rubric.seed_patterns)
 
-        review_queries = _review_search_queries(payload.active_tabs, payload.user_prompt, query_budget_remaining)
+        review_queries = _review_search_queries(payload.active_tabs, effective_user_prompt, query_budget_remaining)
         if allow_discovery and review_queries:
             logger.debug("Running review-focused discovery queries=%s", review_queries)
             review_results = await asyncio.gather(
@@ -2446,7 +2458,7 @@ async def synthesize(payload: SynthesizeRequest) -> ReactFlowGraphData:
         evaluation_passes = 0
         while allow_discovery and evaluation_passes < MAX_EVALUATION_PASSES:
             evaluation = await _evaluate_context(
-                user_prompt=payload.user_prompt,
+                user_prompt=effective_user_prompt,
                 rubric=rubric,
                 context=context,
                 remaining_query_budget=query_budget_remaining,
@@ -2493,7 +2505,7 @@ async def synthesize(payload: SynthesizeRequest) -> ReactFlowGraphData:
             break
 
         raw_graph = await _synthesize_graph(
-            user_prompt=payload.user_prompt,
+            user_prompt=effective_user_prompt,
             user_constraint=payload.user_constraint,
             rubric=rubric,
             context=context,
@@ -2509,7 +2521,7 @@ async def synthesize(payload: SynthesizeRequest) -> ReactFlowGraphData:
         if not clean_tabs:
             clean_tabs = payload.active_tabs  # safety: don't pass empty
 
-        filtered_graph = _filter_graph_for_prompt(raw_graph, payload.user_prompt)
+        filtered_graph = _filter_graph_for_prompt(raw_graph, effective_user_prompt)
         if len(filtered_graph.nodes) != len(raw_graph.nodes):
             logger.debug(
                 "Prompt filter adjusted graph before_nodes=%s after_nodes=%s",
@@ -2525,7 +2537,7 @@ async def synthesize(payload: SynthesizeRequest) -> ReactFlowGraphData:
         graph.rubric_fields = rubric.fields
 
         # Final safety pass: filter again after canonicalization to catch anything re-added
-        graph = _filter_graph_for_prompt(graph, payload.user_prompt)
+        graph = _filter_graph_for_prompt(graph, effective_user_prompt)
 
         logger.debug("Canonical graph snapshot=%s", _debug_json(_graph_debug_payload(graph)))
         placeholder_like_nodes = [

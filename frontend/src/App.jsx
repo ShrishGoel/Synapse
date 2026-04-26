@@ -23,11 +23,6 @@ const BOARD_PADDING = 80;
 const BOARD_MAX_COLUMNS = 4;
 const SESSION_STORAGE_KEY = "synapseFrontendSession";
 const LAST_RUN_TOKEN_STORAGE_KEY = "synapseFrontendLastRunToken";
-const SORT_OPTIONS = [
-  { value: "ai", label: "AI best choice" },
-  { value: "price", label: "Price" },
-  { value: "noise", label: "Noise" },
-];
 
 const TYPE_CLR = {
   listing: "#d0ab67",
@@ -160,12 +155,18 @@ function cardMetricsForNode(node, limit = 3) {
     return [];
   }
   const reviewMetric = reviewMetricForNode(node);
-  const filtered = reviewMetric
-    ? metrics.filter(
-        (metric) =>
-          String(metric?.label || "").trim() !== String(reviewMetric.label || "").trim(),
-      )
-    : metrics;
+  const subtitle = String(node?.subtitle || "").trim().toLowerCase();
+  const subtitleHasPrice = subtitle.includes("price") || subtitle.includes("$");
+  const filtered = metrics.filter((metric) => {
+    const label = String(metric?.label || "").trim();
+    if (reviewMetric && label === String(reviewMetric.label || "").trim()) {
+      return false;
+    }
+    if (subtitleHasPrice && /price|cost|rent/i.test(label)) {
+      return false;
+    }
+    return true;
+  });
   return filtered.slice(0, limit);
 }
 
@@ -202,14 +203,52 @@ function isExternalReviewNode(node) {
   );
 }
 
-function getNodeSortValue(node, sortMode) {
-  if (sortMode === "price") {
-    return metaNumber(node, "priceUsd") ?? Number.POSITIVE_INFINITY;
+function sortValueFromDisplay(display) {
+  const text = String(display || "").trim();
+  if (!text || text.toLowerCase() === "unknown") {
+    return { kind: "missing", value: Number.POSITIVE_INFINITY };
   }
-  if (sortMode === "noise") {
-    return metaNumber(node, "noiseLevelDb") ?? Number.POSITIVE_INFINITY;
+
+  const numericMatch = text.replace(/,/g, "").match(/-?\d+(?:\.\d+)?/);
+  if (numericMatch) {
+    return { kind: "number", value: Number(numericMatch[0]) };
   }
-  return metaNumber(node, "aiRank") ?? Number.POSITIVE_INFINITY;
+
+  return { kind: "text", value: text.toLowerCase() };
+}
+
+function sortValueForMatrixRow(row, sortKey, columnsByKey) {
+  const cell = row?.cells?.[sortKey];
+  const column = columnsByKey[sortKey];
+  if (!cell) {
+    return { kind: "missing", value: Number.POSITIVE_INFINITY };
+  }
+  if (sortKey === "score") {
+    return { kind: "number", value: cell.rank ?? Number.POSITIVE_INFINITY };
+  }
+  if (column?.type === "currency") {
+    return sortValueFromDisplay(cell.display || cell.value);
+  }
+  return sortValueFromDisplay(cell.display || cell.value);
+}
+
+function compareSortValues(left, right) {
+  if (left.kind === "number" && right.kind === "number") {
+    return left.value - right.value;
+  }
+  if (left.kind === "missing" && right.kind === "missing") {
+    return 0;
+  }
+  if (left.kind === "missing") {
+    return 1;
+  }
+  if (right.kind === "missing") {
+    return -1;
+  }
+  return String(left.value).localeCompare(String(right.value), undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
 }
 
 function nodeXForDomain(node, domain) {
@@ -644,7 +683,7 @@ export default function App() {
   const [query, setQuery] = useState(DEFAULT_QUERY);
   const [constraint, setConstraint] = useState("");
   const [view, setView] = useState("board");
-  const [sortMode, setSortMode] = useState("ai");
+  const [sortMode, setSortMode] = useState("score");
   const [showDiscovered, setShowDiscovered] = useState(true);
   const [session, setSession] = useState(null);
   const [positions, setPositions] = useState({});
@@ -859,25 +898,10 @@ export default function App() {
   }, []);
 
   const baseDigestEntries = useMemo(() => {
-    const entries = [...(data?.digest?.entries || [])].filter((entry) =>
+    return [...(data?.digest?.entries || [])].filter((entry) =>
       visibleNodeIds.has(entry.node_id),
     );
-
-    return entries.sort((left, right) => {
-      const leftNode = nodeMap[left.node_id];
-      const rightNode = nodeMap[right.node_id];
-      const leftValue = getNodeSortValue(leftNode, sortMode);
-      const rightValue = getNodeSortValue(rightNode, sortMode);
-
-      if (leftValue !== rightValue) {
-        return leftValue - rightValue;
-      }
-      if (isViolated(leftNode) !== isViolated(rightNode)) {
-        return Number(isViolated(leftNode)) - Number(isViolated(rightNode));
-      }
-      return right.relevance - left.relevance;
-    });
-  }, [data, nodeMap, sortMode, visibleNodeIds]);
+  }, [data, visibleNodeIds]);
 
   useEffect(() => {
     setDigestOrder([]);
@@ -888,8 +912,55 @@ export default function App() {
     [boardNodeIds, data],
   );
 
+  const compareColumnsByKey = useMemo(
+    () =>
+      Object.fromEntries((data?.matrix?.columns || []).map((column) => [column.key, column])),
+    [data],
+  );
+
+  const sortOptions = useMemo(() => {
+    const dynamicColumns = (data?.matrix?.columns || []).filter(
+      (column) => column.key !== "score" && column.key !== "notes",
+    );
+    return [
+      { value: "score", label: "AI best choice" },
+      ...dynamicColumns.map((column) => ({
+        value: column.key,
+        label: column.label,
+      })),
+    ];
+  }, [data]);
+
   useEffect(() => {
-    const nextIds = baseDigestEntries.map((entry) => entry.node_id);
+    if (!sortOptions.some((option) => option.value === sortMode)) {
+      setSortMode("score");
+    }
+  }, [sortMode, sortOptions]);
+
+  const sortedMatrixRows = useMemo(() => {
+    const rows = [...visibleMatrixRows];
+    return rows.sort((left, right) => {
+      const leftNode = nodeMap[left.node_id];
+      const rightNode = nodeMap[right.node_id];
+      const leftValue = sortValueForMatrixRow(left, sortMode, compareColumnsByKey);
+      const rightValue = sortValueForMatrixRow(right, sortMode, compareColumnsByKey);
+      const sortResult = compareSortValues(leftValue, rightValue);
+
+      if (sortResult !== 0) {
+        return sortResult;
+      }
+      if (isViolated(leftNode) !== isViolated(rightNode)) {
+        return Number(isViolated(leftNode)) - Number(isViolated(rightNode));
+      }
+      return (
+        (metaNumber(leftNode, "aiRank") ?? Number.POSITIVE_INFINITY) -
+        (metaNumber(rightNode, "aiRank") ?? Number.POSITIVE_INFINITY)
+      );
+    });
+  }, [compareColumnsByKey, nodeMap, sortMode, visibleMatrixRows]);
+
+  useEffect(() => {
+    const nextIds = sortedMatrixRows.map((row) => row.node_id);
     setDigestOrder((current) => {
       if (!nextIds.length) {
         return [];
@@ -901,17 +972,20 @@ export default function App() {
       const missing = nextIds.filter((id) => !preserved.includes(id));
       return [...preserved, ...missing];
     });
-  }, [baseDigestEntries]);
+  }, [sortedMatrixRows]);
 
   const digestEntries = useMemo(() => {
+    const orderedBaseEntries = sortedMatrixRows
+      .map((row) => baseDigestEntries.find((entry) => entry.node_id === row.node_id))
+      .filter(Boolean);
     if (!digestOrder.length) {
-      return baseDigestEntries;
+      return orderedBaseEntries;
     }
     const entryMap = new Map(
-      baseDigestEntries.map((entry) => [entry.node_id, entry]),
+      orderedBaseEntries.map((entry) => [entry.node_id, entry]),
     );
     return digestOrder.map((id) => entryMap.get(id)).filter(Boolean);
-  }, [baseDigestEntries, digestOrder]);
+  }, [baseDigestEntries, digestOrder, sortedMatrixRows]);
 
   function swapDigestCards(sourceId, targetId) {
     if (!sourceId || !targetId || sourceId === targetId) {
@@ -921,7 +995,7 @@ export default function App() {
     setDigestOrder((current) => {
       const base = current.length
         ? [...current]
-        : baseDigestEntries.map((entry) => entry.node_id);
+        : sortedMatrixRows.map((row) => row.node_id);
       const sourceIndex = base.indexOf(sourceId);
       const targetIndex = base.indexOf(targetId);
 
@@ -937,7 +1011,7 @@ export default function App() {
     });
   }
 
-  const compareColumns = visibleMatrixRows.map((row) => ({
+  const compareColumns = sortedMatrixRows.map((row) => ({
     row,
     node: nodeMap[row.node_id],
   }));
@@ -1117,14 +1191,14 @@ export default function App() {
                   </button>
                 </div>
 
-                {view === "digest" ? (
+                {view === "digest" || view === "compare" ? (
                   <label className="sort-control">
                     <span>Sort</span>
                     <select
                       value={sortMode}
                       onChange={(event) => setSortMode(event.target.value)}
                     >
-                      {SORT_OPTIONS.map((option) => (
+                      {sortOptions.map((option) => (
                         <option key={option.value} value={option.value}>
                           {option.label}
                         </option>
