@@ -304,22 +304,10 @@ function buildChips(rawData: Record<string, unknown>, metrics: ResearchMetric[],
     }
   }
 
-  chips.push(sourceType === "discovered" ? "AI found" : "Captured");
   return chips.slice(0, 4);
 }
 
 function compareValueForLabel(node: ResearchNode, label: string) {
-  if (label === "AI Rank") {
-    const effectiveRank = node.data.effectiveAiRank ?? node.data.aiRank;
-    return effectiveRank ? `#${effectiveRank}` : "Unknown";
-  }
-  if (label === "Constraint Status") {
-    return node.data.constraintViolated ? "Flagged" : "Pass";
-  }
-  if (label === "Constraint Notes") {
-    return node.data.constraintReason || "No issues";
-  }
-
   const rawData = node.data.rawData ?? {};
   const direct = Object.entries(rawData).find(([key, value]) => titleCaseLabel(key) === label && stringifyValue(value));
   if (direct) {
@@ -385,6 +373,8 @@ function GraphCanvasInner({ initialNodes, initialEdges }: GraphCanvasProps) {
   const [renderStatus, setRenderStatus] = useState<string>("Idle");
   const requestSequenceRef = useRef(0);
   const didInitialLoadRef = useRef(false);
+  const promptInputRef = useRef<HTMLInputElement | null>(null);
+  const constraintInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     setGraph(initialNodes, initialEdges);
@@ -444,9 +434,14 @@ function GraphCanvasInner({ initialNodes, initialEdges }: GraphCanvasProps) {
         "seed",
       ).toLowerCase();
       const sourceType = sourceTypeRaw === "discovered" ? "discovered" : "seed";
+      const originKindRaw = stringifyValue(
+        backendData.originKind ?? getValue(rawData, ["originKind", "Origin Kind", "origin_kind"]),
+        sourceType === "discovered" ? "firecrawl" : "user",
+      ).toLowerCase();
+      const originKind = originKindRaw === "firecrawl" ? "firecrawl" : "user";
       const sourceLabel =
         stringifyValue(backendData.sourceLabel) ||
-        (url ? hostnameLabel(url) : stringifyValue(getValue(rawData, ["source", "Source", "Brand"]), sourceType === "discovered" ? "AI found" : "Captured"));
+        (url ? hostnameLabel(url) : stringifyValue(getValue(rawData, ["source", "Source", "Brand"]), originKind === "firecrawl" ? "AI found" : "Captured"));
       const locationLabel =
         stringifyValue(backendData.locationLabel) ||
         stringifyValue(
@@ -518,6 +513,7 @@ function GraphCanvasInner({ initialNodes, initialEdges }: GraphCanvasProps) {
           aiRank,
           aiReason,
           sourceType,
+          originKind,
           constraintViolated: Boolean(backendData.constraintViolated ?? getValue(rawData, ["constraintViolated", "Constraint Violated"])),
           constraintReason: stringifyValue(backendData.constraintReason ?? getValue(rawData, ["constraintReason", "Constraint Reason"]), ""),
           metrics: resolvedMetrics,
@@ -582,7 +578,7 @@ function GraphCanvasInner({ initialNodes, initialEdges }: GraphCanvasProps) {
             body: JSON.stringify({
               user_prompt: resolvedUserPrompt,
               user_constraint: constraint,
-              firecrawl_query_budget: 4,
+              firecrawl_query_budget: statsPayload.enable_discovery ? 4 : 0,
               max_tabs: 20,
             }),
           });
@@ -632,9 +628,12 @@ function GraphCanvasInner({ initialNodes, initialEdges }: GraphCanvasProps) {
     [getApiBases, normalizeGraphNodes, setGraph],
   );
 
-  const runSynthesis = useCallback(async () => {
-    const trimmed = constraintInput.trim();
-    const prompt = userPromptInput.trim() || "Graph the pages I have been looking at.";
+  const runSynthesis = useCallback(async (nextPrompt?: string, nextConstraint?: string) => {
+    const promptValue = nextPrompt ?? promptInputRef.current?.value ?? userPromptInput;
+    const constraintValue =
+      nextConstraint ?? constraintInputRef.current?.value ?? constraintInput;
+    const trimmed = constraintValue.trim();
+    const prompt = promptValue.trim() || "Graph the pages I have been looking at.";
 
     const requestId = ++requestSequenceRef.current;
     setIsApplyingConstraint(true);
@@ -656,6 +655,17 @@ function GraphCanvasInner({ initialNodes, initialEdges }: GraphCanvasProps) {
       }
     }
   }, [constraintInput, loadFromExtension, userPromptInput]);
+
+  const triggerSynthesis = useCallback(() => {
+    const nextPrompt = promptInputRef.current?.value ?? userPromptInput;
+    const nextConstraint = constraintInputRef.current?.value ?? constraintInput;
+    setUserPromptInput(nextPrompt);
+    setConstraintInput(nextConstraint);
+    runSynthesis(nextPrompt, nextConstraint).catch((error: unknown) => {
+      setIsApplyingConstraint(false);
+      setConstraintError(error instanceof Error ? error.message : "Constraint request failed");
+    });
+  }, [constraintInput, runSynthesis, userPromptInput]);
 
   useEffect(() => {
     if (initialNodes.length > 0 || didInitialLoadRef.current) {
@@ -691,27 +701,11 @@ function GraphCanvasInner({ initialNodes, initialEdges }: GraphCanvasProps) {
     if (nodes.length === 0) {
       return null;
     }
-    return [...nodes].sort(
-      (a, b) => (a.data.effectiveAiRank ?? a.data.aiRank) - (b.data.effectiveAiRank ?? b.data.aiRank),
-    )[0];
+    return [...nodes].sort((a, b) => a.data.aiRank - b.data.aiRank)[0];
   }, [nodes]);
 
   const compareRows = useMemo<CompareRow[]>(() => {
     const activeNodes = nodes;
-    const constraintRows: CompareRow[] = [
-      {
-        label: "AI Rank",
-        values: activeNodes.map((node) => compareValueForLabel(node, "AI Rank")),
-      },
-      {
-        label: "Constraint Status",
-        values: activeNodes.map((node) => compareValueForLabel(node, "Constraint Status")),
-      },
-      {
-        label: "Constraint Notes",
-        values: activeNodes.map((node) => compareValueForLabel(node, "Constraint Notes")),
-      },
-    ];
     const metricCounts = new Map<string, number>();
 
     for (const node of activeNodes) {
@@ -729,13 +723,10 @@ function GraphCanvasInner({ initialNodes, initialEdges }: GraphCanvasProps) {
       .map(([label]) => label);
 
     if (rankedMetricLabels.length > 0) {
-      return [
-        ...constraintRows,
-        ...rankedMetricLabels.map((label) => ({
-          label,
-          values: activeNodes.map((node) => compareValueForLabel(node, label)),
-        })),
-      ];
+      return rankedMetricLabels.map((label) => ({
+        label,
+        values: activeNodes.map((node) => compareValueForLabel(node, label)),
+      }));
     }
 
     const labelCounts = new Map<string, number>();
@@ -757,21 +748,19 @@ function GraphCanvasInner({ initialNodes, initialEdges }: GraphCanvasProps) {
       .map(([label]) => label);
 
     if (metricLabels.length === 0) {
-      const fallbackRows =
-        activeNodes[0]?.data.metrics?.slice(0, 4).map((metric) => ({
-          label: metric.label,
-          values: activeNodes.map((node) => node.data.metrics?.find((item) => item.label === metric.label)?.value || "Unknown"),
-        })) ?? [];
-      return [...constraintRows, ...fallbackRows];
+      return activeNodes[0]?.data.metrics?.slice(0, 4).map((metric) => ({
+        label: metric.label,
+        values: activeNodes.map((node) => node.data.metrics?.find((item) => item.label === metric.label)?.value || "Unknown"),
+      })) ?? [];
     }
 
-    return [
-      ...constraintRows,
-      ...metricLabels.map((label) => ({
-        label,
-        values: activeNodes.map((node) => compareValueForLabel(node, label)),
-      })),
-    ];
+    return metricLabels.map((label) => ({
+      label,
+      values: activeNodes.map((node) => {
+        const rawData = node.data.rawData ?? {};
+        return compareValueForLabel(node, label);
+      }),
+    }));
   }, [nodes]);
 
   const boardHeight = getBoardHeight(nodes.length, viewportWidth);
@@ -827,36 +816,46 @@ function GraphCanvasInner({ initialNodes, initialEdges }: GraphCanvasProps) {
                 </div>
 
                 <div className="grid w-full gap-2 xl:grid-cols-[minmax(560px,1fr)_auto]">
-                  <form
+                  <div
                     className="flex flex-wrap items-center gap-2 rounded-[24px] border border-[#312e26] bg-[#211f19]/92 px-4 py-3"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      runSynthesis().catch((error: unknown) => {
-                        setIsApplyingConstraint(false);
-                        setConstraintError(error instanceof Error ? error.message : "Constraint request failed");
-                      });
-                    }}
                   >
                     <input
+                      ref={promptInputRef}
                       value={userPromptInput}
                       onChange={(event) => setUserPromptInput(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter" || event.nativeEvent.isComposing) {
+                          return;
+                        }
+                        event.preventDefault();
+                        triggerSynthesis();
+                      }}
                       placeholder="Graph the laptop coolers"
                       className="min-w-[240px] flex-1 rounded-2xl border border-[#353128] bg-[#15140f] px-4 py-3 text-sm text-[#f5f0e4] outline-none placeholder:text-[#7d7668]"
                     />
                     <input
+                      ref={constraintInputRef}
                       value={constraintInput}
                       onChange={(event) => setConstraintInput(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter" || event.nativeEvent.isComposing) {
+                          return;
+                        }
+                        event.preventDefault();
+                        triggerSynthesis();
+                      }}
                       placeholder="Optional AI constraint..."
                       className="min-w-[200px] flex-1 rounded-2xl border border-[#353128] bg-[#15140f] px-4 py-3 text-sm text-[#f5f0e4] outline-none placeholder:text-[#7d7668]"
                     />
                     <button
-                      type="submit"
+                      type="button"
+                      onClick={triggerSynthesis}
                       disabled={isApplyingConstraint}
                       className="rounded-2xl bg-[#e0b36b] px-5 py-3 text-sm font-medium text-[#241f16] transition-opacity disabled:opacity-60"
                     >
                       {isApplyingConstraint ? "Running..." : "Run"}
                     </button>
-                  </form>
+                  </div>
 
                   <label className="flex items-center justify-between gap-3 rounded-[22px] border border-[#312e26] bg-[#211f19]/92 px-4 py-3 text-sm text-[#e6dfd0]">
                     <span className="flex items-center gap-2 text-[#d5ccbc]">
@@ -1048,12 +1047,6 @@ function FragmentCompareRow({ row }: { row: CompareRow }) {
           key={`${row.label}-${index}`}
           className={cn(
             "rounded-[22px] border px-4 py-5 text-[17px] text-[#efe8db]",
-            row.label === "Constraint Status" && String(value).toLowerCase() === "flagged"
-              ? "border-[#8a4d47] bg-[#402725]/90 text-[#ffd8d2]"
-              : "",
-            row.label === "Constraint Notes" && value !== "No issues"
-              ? "border-[#6c5441] bg-[#3a2f27]/85 text-[#f6ddd3]"
-              : "",
             index === row.values.length - 1
               ? "border-[#6c5441] bg-[#3a2f27]/85"
               : "border-[#3a362d] bg-[#2b2923]",

@@ -26,7 +26,6 @@ export function ResearchCard({ id, data, selected }: NodeProps<ResearchNodeData>
   const nodeCount = useGraphStore((state) => state.nodes.length);
   const isSelected = selected || selectedNodeId === id;
   const image = data.thumbnail || faviconFor(data.url);
-  const displayedRank = data.effectiveAiRank ?? data.aiRank;
   const safeIndex = Math.max(0, nodeIndex);
   const safeCount = Math.max(1, nodeCount);
   const ratio = safeCount <= 1 ? 0 : safeIndex / (safeCount - 1);
@@ -118,7 +117,7 @@ export function ResearchCard({ id, data, selected }: NodeProps<ResearchNodeData>
               <ExternalLink className="h-3.5 w-3.5" />
             </a>
 
-            <div className="text-[10px] uppercase tracking-[0.12em] text-[#8f846f]">Rank {displayedRank}</div>
+            <div className="text-[10px] uppercase tracking-[0.12em] text-[#8f846f]">Rank {data.aiRank}</div>
           </div>
 
           {isConstraintViolated ? (

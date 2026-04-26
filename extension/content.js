@@ -10,6 +10,40 @@
     return typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
   }
 
+  function textFromSelectors(selectors, root = document) {
+    for (const selector of selectors) {
+      const element = root.querySelector(selector);
+      if (!isVisible(element)) {
+        continue;
+      }
+      const text = normalizeWhitespace(element.textContent || element.getAttribute?.("aria-label") || "");
+      if (text) {
+        return text;
+      }
+    }
+    return "";
+  }
+
+  function collectTexts(selector, root = document, maxCount = 8, minLength = 8) {
+    const values = [];
+    const seen = new Set();
+    root.querySelectorAll(selector).forEach((element) => {
+      if (values.length >= maxCount || !isVisible(element)) {
+        return;
+      }
+      if (element.closest("nav, header, footer, aside, form")) {
+        return;
+      }
+      const text = normalizeWhitespace(element.textContent || element.getAttribute?.("aria-label") || "");
+      if (!text || text.length < minLength || seen.has(text)) {
+        return;
+      }
+      seen.add(text);
+      values.push(text);
+    });
+    return values;
+  }
+
   function pickRootElement() {
     return (
       document.querySelector("main") ||
@@ -70,6 +104,10 @@
         return;
       }
 
+      if (element.closest("#sp_detail, #sp_detail2, [id*='sims' i], [id*='sponsored' i], [data-component-type='sp-sponsored-result']")) {
+        return;
+      }
+
       const text = normalizeWhitespace(element.textContent);
       if (!text || text.length < 20 || seen.has(text)) {
         return;
@@ -80,6 +118,132 @@
     });
 
     return blocks.slice(0, 120);
+  }
+
+  function captureAmazonProductReadable() {
+    if (!/amazon\./i.test(location.hostname)) {
+      return null;
+    }
+
+    const title = textFromSelectors(
+      [
+        "#productTitle",
+        "#title",
+        "[data-feature-name='title'] h1",
+        "#ebooksProductTitle",
+      ],
+      document,
+    ) || normalizeWhitespace(document.title).replace(/^Amazon\.com:\s*/i, "").replace(/\s+:\s+[^:]+$/, "");
+
+    if (!title) {
+      return null;
+    }
+
+    const lines = [`Title: ${title}`];
+    const price = textFromSelectors(
+      [
+        "#corePrice_feature_div .a-offscreen",
+        "#corePriceDisplay_desktop_feature_div .a-offscreen",
+        "#apex_desktop .a-offscreen",
+        "#priceblock_ourprice",
+        "#priceblock_dealprice",
+        "#price_inside_buybox",
+        ".priceToPay .a-offscreen",
+      ],
+      document,
+    );
+    if (price) {
+      lines.push(`Price: ${price}`);
+    }
+
+    const rating =
+      normalizeWhitespace(document.querySelector("#acrPopover")?.getAttribute("title") || "") ||
+      textFromSelectors(
+        [
+          "[data-hook='rating-out-of-text']",
+          "#averageCustomerReviews .a-icon-alt",
+          "[data-hook='average-star-rating']",
+        ],
+        document,
+      );
+    if (rating) {
+      lines.push(`Star rating: ${rating}`);
+    }
+
+    const reviewCount = textFromSelectors(
+      ["#acrCustomerReviewText", "#acrCustomerReviewLink", "[data-hook='total-review-count']"],
+      document,
+    );
+    if (reviewCount) {
+      lines.push(`Review count: ${reviewCount}`);
+    }
+
+    const bullets = collectTexts(
+      "#feature-bullets li, #productFactsDesktopExpander li, #detailBullets_feature_div li",
+      document,
+      8,
+      12,
+    );
+    if (bullets.length) {
+      lines.push(`About this item: ${bullets.join(" | ")}`);
+    }
+
+    const reviewSummaryContainer =
+      document.querySelector("#product-summary") ||
+      document.querySelector("[data-hook='cr-insights-widget-summary']") ||
+      document.querySelector("#averageCustomerReviews_feature_div") ||
+      document.querySelector("#reviewsMedley");
+    const reviewSummaryBlocks = reviewSummaryContainer
+      ? collectTexts("p, span, div, li", reviewSummaryContainer, 8, 24)
+      : [];
+    const customerSayLine = reviewSummaryBlocks.find((text) => /^customers say/i.test(text));
+    if (customerSayLine) {
+      lines.push(customerSayLine.includes(":") ? customerSayLine : `Customers say: ${customerSayLine}`);
+    }
+
+    const aspectLines = reviewSummaryBlocks.filter((text) =>
+      /(customers mention|positive|negative|reliability|noise level|cooling performance|value for money)/i.test(text),
+    );
+    if (aspectLines.length) {
+      lines.push(`Review highlights: ${aspectLines.slice(0, 6).join(" | ")}`);
+    }
+
+    const topReviews = [];
+    document.querySelectorAll("[data-hook='review']").forEach((review) => {
+      if (topReviews.length >= 3 || !isVisible(review)) {
+        return;
+      }
+      const titleText = normalizeWhitespace(
+        review.querySelector("[data-hook='review-title'], .review-title")?.textContent || "",
+      );
+      const bodyText = normalizeWhitespace(
+        review.querySelector("[data-hook='review-body'], .review-text-content")?.textContent || "",
+      );
+      const combined = [titleText, bodyText].filter(Boolean).join(" - ");
+      if (combined && combined.length >= 40) {
+        topReviews.push(combined);
+      }
+    });
+    topReviews.forEach((reviewText, index) => {
+      lines.push(`Top review ${index + 1}: ${reviewText}`);
+    });
+
+    const textContent = normalizeWhitespace(lines.join("\n\n"));
+    if (!textContent) {
+      return null;
+    }
+
+    return {
+      extractor: "amazon-product",
+      title,
+      byline: "",
+      excerpt: lines.slice(0, 3).join(" "),
+      siteName: "Amazon",
+      lang: document.documentElement?.lang || "",
+      length: textContent.length,
+      content: lines.map((line) => `<p>${escapeHtml(line)}</p>`).join(""),
+      textContent,
+    };
   }
 
   function collectMetadata(root) {
@@ -130,6 +294,11 @@
   }
 
   function captureReadable() {
+    const amazonReadable = captureAmazonProductReadable();
+    if (amazonReadable) {
+      return amazonReadable;
+    }
+
     const root = pickRootElement();
     if (!root) {
       return null;

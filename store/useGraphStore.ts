@@ -27,9 +27,9 @@ export type ResearchNodeData = {
   rentalType: string;
   combinedScore: number;
   aiRank: number;
-  effectiveAiRank?: number;
   aiReason: string;
   sourceType: NodeSourceType;
+  originKind?: "user" | "firecrawl";
   constraintViolated: boolean;
   constraintReason: string;
   metrics?: ResearchMetric[];
@@ -114,34 +114,16 @@ export function sortResearchNodes(nodes: ResearchNode[], sortMode: SortMode) {
   }
 
   return [...nodes].sort((a, b) => {
-    const aViolated = Number(Boolean(a.data.constraintViolated));
-    const bViolated = Number(Boolean(b.data.constraintViolated));
-    if (aViolated !== bViolated) {
-      return aViolated - bViolated;
-    }
-
     if (sortMode === "price") {
-      const priceDiff = a.data.priceUsd - b.data.priceUsd;
-      if (priceDiff !== 0) {
-        return priceDiff;
-      }
-      return a.data.aiRank - b.data.aiRank;
+      return a.data.priceUsd - b.data.priceUsd;
     }
 
     if (sortMode === "distance") {
-      const distanceDiff = a.data.distanceMiles - b.data.distanceMiles;
-      if (distanceDiff !== 0) {
-        return distanceDiff;
-      }
-      return a.data.aiRank - b.data.aiRank;
+      return a.data.distanceMiles - b.data.distanceMiles;
     }
 
     if (sortMode === "space") {
-      const spaceDiff = b.data.squareFeet - a.data.squareFeet;
-      if (spaceDiff !== 0) {
-        return spaceDiff;
-      }
-      return a.data.aiRank - b.data.aiRank;
+      return b.data.squareFeet - a.data.squareFeet;
     }
 
     return a.data.aiRank - b.data.aiRank;
@@ -179,14 +161,12 @@ function filterVisibleNodes(allNodes: ResearchNode[], showDiscovered: boolean) {
 function deriveVisibleNodes(allNodes: ResearchNode[], sortMode: SortMode, showDiscovered: boolean) {
   const visibleNodes = filterVisibleNodes(allNodes, showDiscovered);
   const sorted = sortResearchNodes(visibleNodes, sortMode);
-  const rankedNodes = sorted.map((node, index) => ({
-    ...node,
-    data: {
-      ...node.data,
-      effectiveAiRank: index + 1,
-    },
-  }));
-  return calculateBoardNodes(rankedNodes, getViewportWidth());
+  const groupedByConstraint = [...sorted].sort((a, b) => {
+    const aViolated = a.data.constraintViolated ? 1 : 0;
+    const bViolated = b.data.constraintViolated ? 1 : 0;
+    return aViolated - bViolated;
+  });
+  return calculateBoardNodes(groupedByConstraint, getViewportWidth());
 }
 
 function deriveVisibleEdges(allEdges: ResearchEdge[], visibleNodes: ResearchNode[]) {

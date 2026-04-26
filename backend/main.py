@@ -4,7 +4,9 @@ import logging
 import os
 import re
 import time
+from html import escape as html_escape
 from typing import Any, Literal, TypeVar
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -88,8 +90,9 @@ async def force_cors_headers(request, call_next):
 
 EXTENSION_RETENTION_SECONDS = 30 * 60
 extension_history: dict[str, dict[str, Any]] = {}
-extension_preferences: dict[str, str] = {
-    "user_prompt": "Graph the rentals I've been looking at."
+extension_preferences: dict[str, Any] = {
+    "user_prompt": "Compare the items I've been looking at.",
+    "enable_discovery": DISCOVERY_ENABLED_BY_DEFAULT,
 }
 
 
@@ -107,6 +110,7 @@ class SynthesizeRequest(StrictModel):
     user_constraint: str | None = Field(default=None, min_length=1)
     active_tabs: list[ActiveTab] = Field(min_length=1)
     firecrawl_query_budget: int = Field(default=DEFAULT_FIRECRAWL_QUERY_BUDGET, ge=0, le=12)
+    enable_discovery: bool | None = None
     previous_graph: dict[str, Any] | None = Field(default=None)
 
 
@@ -114,6 +118,9 @@ class DomTab(StrictModel):
     url: HttpUrl
     title: str = ""
     dom: str = Field(min_length=1)
+    readable_text: str = ""
+    readable_html: str = ""
+    readable_extractor: str = ""
 
 
 class SynthesizeFromDomRequest(StrictModel):
@@ -121,6 +128,7 @@ class SynthesizeFromDomRequest(StrictModel):
     user_constraint: str | None = Field(default=None, min_length=1)
     tabs: list[DomTab] = Field(min_length=1)
     firecrawl_query_budget: int = Field(default=DEFAULT_FIRECRAWL_QUERY_BUDGET, ge=0, le=12)
+    enable_discovery: bool | None = None
     previous_graph: dict[str, Any] | None = Field(default=None)
 
 
@@ -129,17 +137,22 @@ class SynthesizeFromExtensionRequest(StrictModel):
     user_constraint: str | None = Field(default=None, min_length=1)
     firecrawl_query_budget: int = Field(default=DEFAULT_FIRECRAWL_QUERY_BUDGET, ge=0, le=12)
     max_tabs: int = Field(default=20, ge=1, le=50)
+    enable_discovery: bool | None = None
     previous_graph: dict[str, Any] | None = Field(default=None)
 
 class ExtensionSnapshot(StrictModel):
     url: HttpUrl
     title: str = ""
     dom: str = Field(min_length=1)
+    readable_text: str = ""
+    readable_html: str = ""
+    readable_extractor: str = ""
     timestamp: int | None = None
 
 
 class ExtensionPreferencesRequest(StrictModel):
     user_prompt: str = Field(min_length=1, max_length=400)
+    enable_discovery: bool = DISCOVERY_ENABLED_BY_DEFAULT
 
 
 class ComparisonRubric(StrictModel):
@@ -215,6 +228,7 @@ class SessionGraphNode(BaseModel):
 
     id: str
     type: str
+    url: str = ""
     source: str
     title: str
     subtitle: str
@@ -302,6 +316,7 @@ class SessionDigest(StrictModel):
 class UnifiedSession(StrictModel):
     session_id: str
     query: str
+    user_constraint: str = ""
     domain: str
     status: str
     rubric_fields: list[str] = Field(default_factory=list)
@@ -440,6 +455,76 @@ def _tabs_to_context(active_tabs: list[ActiveTab]) -> str:
     return "\n\n".join(chunks)
 
 
+def _review_field_label() -> str:
+    return "Review Consensus"
+
+
+def _is_review_field_label(label: str) -> bool:
+    normalized = _normalize_data_key(label)
+    return any(
+        token in normalized
+        for token in ("review", "complaint", "feedback", "sentiment", "consensus")
+    )
+
+
+def _review_field_value_from_mapping(data: dict[str, Any]) -> str:
+    if not isinstance(data, dict):
+        return ""
+    review_label = _review_field_label()
+    direct_value = _stringify_data_value(
+        _lookup_data_value(data, [review_label, "Review Sentiment", "User Feedback", "Common Complaints"])
+    )
+    if direct_value and direct_value != "Unknown":
+        return direct_value
+    for key, value in data.items():
+        if not _is_review_field_label(str(key)):
+            continue
+        text = _stringify_data_value(value)
+        if text and text != "Unknown":
+            return text
+    return ""
+
+
+def _prioritize_review_metrics(metrics: list[dict[str, str]], limit: int = 6) -> list[dict[str, str]]:
+    if not metrics:
+        return []
+    has_review_consensus = any(
+        _normalize_data_key(_stringify_data_value(metric.get("label"))) == _normalize_data_key(_review_field_label())
+        for metric in metrics
+        if isinstance(metric, dict)
+    )
+    review_metrics = [
+        metric for metric in metrics
+        if _is_review_field_label(_stringify_data_value(metric.get("label")))
+        and not (
+            has_review_consensus
+            and _normalize_data_key(_stringify_data_value(metric.get("label"))) == _normalize_data_key("Review Sentiment")
+        )
+    ]
+    other_metrics = [
+        metric for metric in metrics
+        if not _is_review_field_label(_stringify_data_value(metric.get("label")))
+    ]
+    prioritized = [*review_metrics, *other_metrics]
+    return prioritized[:limit]
+
+
+def _ensure_review_field_in_rubric(rubric: ComparisonRubric) -> ComparisonRubric:
+    fields = list(rubric.fields)
+    review_label = _review_field_label()
+    review_index = next(
+        (index for index, field in enumerate(fields) if _normalize_data_key(field) == _normalize_data_key(review_label)),
+        None,
+    )
+    if review_index is None:
+        fields.insert(1 if len(fields) >= 1 else 0, review_label)
+    else:
+        existing = fields.pop(review_index)
+        fields.insert(1 if len(fields) >= 1 else 0, existing)
+    fields = fields[:12]
+    return rubric.model_copy(update={"fields": fields})
+
+
 def _tab_debug_payload(tab: ActiveTab | DomTab) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "url": str(tab.url),
@@ -472,7 +557,6 @@ def _entry_relevance_score(entry: dict[str, Any], user_prompt: str) -> int:
     title = str(entry.get("title", "")).lower()
     url = str(entry.get("url", "")).lower()
     combined = f"{title} {url}"
-    prompt = user_prompt.lower()
     score = 0
 
     negative_tokens = ["firecrawl", "openrouter", "dashboard", "usage", "billing", "docs", "synapse"]
@@ -493,6 +577,9 @@ def _entry_relevance_score(entry: dict[str, Any], user_prompt: str) -> int:
     except Exception:
         pass
 
+    if "/s?" in url or "search results" in combined:
+        score -= 4
+
     prompt = user_prompt.lower()
     if "cooler" in prompt and "stand" in combined and all(token not in combined for token in ["cool", "cooler", "cooling"]):
         score -= 6
@@ -503,10 +590,6 @@ def _entry_relevance_score(entry: dict[str, Any], user_prompt: str) -> int:
         elif keyword in combined:
             score += 2
     if "amazon" in combined and "amazon" in user_prompt.lower():
-        score += 2
-    if "zillow" in combined and "zillow" in user_prompt.lower():
-        score += 2
-    if "apartments" in combined and "rental" in user_prompt.lower():
         score += 2
     score -= min(int(entry.get("dom", "") and len(str(entry.get("dom", ""))) / 100000), 3)
     return score
@@ -542,18 +625,7 @@ def _select_relevant_extension_entries(
     if any(score > 0 for _, score, _ in scored):
         scored = [item for item in scored if item[1] > 0]
 
-    selected: list[dict[str, Any]] = []
-    total_dom_chars = 0
-    for entry, _, _ in scored:
-        dom = str(entry.get("dom", ""))
-        dom_len = len(dom)
-        if selected and total_dom_chars + dom_len > MAX_EXTENSION_HISTORY_DOM_CHARS:
-            continue
-        selected.append(entry)
-        total_dom_chars += dom_len
-        if len(selected) >= max_tabs:
-            break
-
+    selected = [entry for entry, _, _ in scored[:max_tabs]]
     if selected:
         return selected
 
@@ -611,14 +683,28 @@ def _render_dom_summary(tab: DomTab, summary: dict[str, Any]) -> str:
     return " | ".join(lines)
 
 
+def _best_dom_summary_input(tab: DomTab) -> str:
+    if tab.readable_html.strip():
+        title = tab.title.strip() or str(tab.url)
+        return (
+            "<html><head>"
+            f"<title>{html_escape(title)}</title>"
+            "</head><body><main>"
+            f"{tab.readable_html}"
+            "</main></body></html>"
+        )
+    return tab.dom
+
+
 async def _dom_tab_to_active_tab(tab: DomTab) -> ActiveTab:
-    summary = await asyncio.to_thread(summarize_html, tab.dom)
+    summary = await asyncio.to_thread(summarize_html, _best_dom_summary_input(tab))
     normalized_summary = _render_dom_summary(tab, summary)
     return ActiveTab(url=tab.url, summary=normalized_summary)
 
 
 def _fallback_dom_summary(tab: DomTab) -> str:
-    stripped = re.sub(r"<[^>]+>", " ", tab.dom)
+    source_text = tab.readable_text.strip() or tab.readable_html or tab.dom
+    stripped = re.sub(r"<[^>]+>", " ", source_text)
     collapsed = re.sub(r"\s+", " ", stripped).strip()
     excerpt = collapsed[:1000]
     title = tab.title or str(tab.url)
@@ -788,24 +874,34 @@ async def _structured_llm_call(
 
 
 async def _build_rubric(payload: SynthesizeRequest, base_context: str) -> ComparisonRubric:
-    return await _structured_llm_call(
+    rubric = await _structured_llm_call(
         model_type=ComparisonRubric,
         schema_name="comparison_rubric",
         system_prompt=(
-            "You are an expert research rubric designer. Based on the user's "
-            "query and the provided context from their current research session, "
-            "your job is to design a structured comparison rubric."
+            "You are an expert research rubric designer. Infer the rubric from the seed items themselves "
+            "and the user's query. Choose comparison fields that are natively meaningful for the actual "
+            "item category shown in the captured tabs. Never mix fields from unrelated domains. Prefer "
+            "concrete fields that are directly evidenced in the captured context, and include price when "
+            "price or cost appears in the seed material or is central to the comparison. For consumer choices, "
+            "recommendation-style comparisons, products, software, gear, services, or listings with public feedback, "
+            "include Review Consensus as one of the rubric fields, and add other review-oriented fields such as Review Sentiment, User Feedback, "
+            "or Common Complaints whenever the context can support it."
         ),
         user_prompt=(
             f"User query: {payload.user_prompt}\n"
             f"User constraint: {payload.user_constraint or 'None'}\n\n"
             f"Context (snapshots the user has gathered):\n{base_context}\n\n"
-            "Generate a generic domain name (like 'housing' or 'products' or 'locations'), "
-            "5-10 useful comparison fields (MUST be human-readable and Title Cased, e.g. 'Monthly Rent' not 'monthly_rent'), "
+            "Generate a generic domain name, "
+            "5-10 useful comparison fields (MUST be human-readable and Title Cased, e.g. 'Battery Life' not 'battery_life'), "
             "any inferred constraints, "
-            "a default ordering philosophy, and common patterns to look for."
+            "a default ordering philosophy, and common patterns to look for. "
+            "Fields must fit the actual item category present in the context. Avoid category leakage "
+            "from unrelated domains, and prefer labels that can be directly supported by the captured tabs. "
+            "One of the comparison fields in the rubric MUST be exactly 'Review Consensus'. "
+            "Keep 'Review Consensus' within the most important comparison fields so it appears in the main comparison table."
         ),
     )
+    return _ensure_review_field_in_rubric(rubric)
 
 
 async def _evaluate_context(
@@ -823,9 +919,11 @@ async def _evaluate_context(
             "React Flow graph. If information is missing, provide only the smallest number of specific "
             "web search queries. Do not request searches for information already present. "
             "Minimize Firecrawl credit usage. Search only when likely to add materially new qualifying "
-            "items or recent discussion signals. Search for candidate listings that expose price, "
-            "distance or neighborhood fit, rental or product type, source URLs, and independent review "
-            "or complaint signals when the user asks about reviews."
+            "items or recent discussion signals. Search only for fields that are actually present in the rubric "
+            "or clearly implied by the user's query. Do not import fields from unrelated domains. Search for "
+            "candidate listings that expose price, source URLs, rubric-relevant specs or fit signals, and "
+            "independent review or complaint signals when the user asks about reviews or when the comparison is a "
+            "consumer-choice decision where public feedback materially affects ranking."
         ),
         user_prompt=(
             f"User prompt:\n{user_prompt}\n\n"
@@ -941,9 +1039,10 @@ async def _synthesize_graph(
             "ONLY create nodes for INDIVIDUAL items being researched (e.g., a specific apartment, a specific product). "
             f"Keep each url under {MAX_SYNTHESIZED_URL_CHARS} characters and prefer canonical URLs without tracking, checkout, "
             "affiliate, or session parameters. sourceType is either seed or discovered. "
-            "When external review context is present, include External Review Consensus and Common Complaints "
-            "as attributes, distinguish owner/reviewer sentiment from seller claims, and cite recent internet "
-            "listing or discussion signals when possible."
+            "When external review context is present, express those findings through the rubric-field attributes "
+            "instead of inventing extra labels, distinguish owner/reviewer sentiment from seller claims, and cite "
+            "recent internet listing or discussion signals when possible. Prioritize review evidence and tradeoff "
+            "signals in ranking, summaries, and attribute selection whenever credible review context exists."
         ),
         user_prompt=(
             f"User prompt:\n{user_prompt}\n\n"
@@ -959,11 +1058,31 @@ async def _synthesize_graph(
             "Put the domain facts in attributes instead of embedding them into aiReason or constraintReason. "
             "Each attribute should be a short label/value pair. The label MUST EXACTLY match a string from the 'Rubric fields' list. "
             "If a rubric field is missing from the item, you may omit it or set value to 'Unknown'. "
+            "If review evidence exists, make sure at least one review-oriented rubric field is populated for that node. "
             "Keep all seed items and previous graph nodes, then choose only the most relevant discovered items if there are more candidates than the graph can hold."
         ),
     )
     if isinstance(graph, ReactFlowGraphData):
         return graph
+    review_label = _review_field_label()
+    updated_nodes: list[SynthesizedNode] = []
+    for node in graph.nodes:
+        attributes = list(node.attributes)
+        if not any(_normalize_data_key(attribute.label) == _normalize_data_key(review_label) for attribute in attributes):
+            existing_review_value = ""
+            for attribute in attributes:
+                if _is_review_field_label(attribute.label):
+                    existing_review_value = _stringify_data_value(attribute.value)
+                    if existing_review_value and existing_review_value != "Unknown":
+                        break
+            attributes.append(
+                SynthesizedAttribute(
+                    label=review_label,
+                    value=existing_review_value or "Unknown",
+                )
+            )
+        updated_nodes.append(node.model_copy(update={"attributes": attributes[:18]}))
+    graph = graph.model_copy(update={"nodes": updated_nodes})
     return _synthesized_graph_to_react_flow(graph)
 
 
@@ -1050,62 +1169,6 @@ def _parse_price_value(value: Any, fallback: float = 0) -> float:
     return fallback
 
 
-def _derive_review_sentiment(raw_data: dict[str, Any], summary: str, ai_reason: str) -> tuple[str, str]:
-    review_blob_parts: list[str] = [summary, ai_reason]
-    for key in [
-        "Review Summary",
-        "Reviews",
-        "Customer Reviews",
-        "Sentiment",
-        "Discussion Summary",
-        "Reddit Consensus",
-    ]:
-        value = _stringify_data_value(raw_data.get(key))
-        if value:
-            review_blob_parts.append(value)
-
-    blob = " ".join(part for part in review_blob_parts if part).lower()
-    if not blob:
-        return ("unknown", "Unknown")
-
-    positive_hits = sum(
-        blob.count(token)
-        for token in [
-            "positive",
-            "well-reviewed",
-            "recommended",
-            "popular",
-            "praised",
-            "great",
-            "excellent",
-            "quiet",
-            "best",
-            "reliable",
-        ]
-    )
-    negative_hits = sum(
-        blob.count(token)
-        for token in [
-            "negative",
-            "complaint",
-            "complaints",
-            "loud",
-            "noisy",
-            "issues",
-            "problem",
-            "problems",
-            "weak",
-            "expensive",
-            "criticized",
-        ]
-    )
-    if positive_hits > negative_hits:
-        return ("positive", "Generally positive")
-    if negative_hits > positive_hits:
-        return ("negative", "Generally mixed / negative")
-    return ("neutral", "Mixed / unclear")
-
-
 def _lookup_data_value(data: dict[str, Any], keys: list[str]) -> Any:
     for key in keys:
         value = data.get(key)
@@ -1121,6 +1184,22 @@ def _lookup_data_value(data: dict[str, Any], keys: list[str]) -> Any:
         normalized_key = _normalize_data_key(key)
         if normalized_key in normalized_items:
             return normalized_items[normalized_key]
+    return None
+
+
+def _lookup_data_value_by_label_tokens(
+    data: dict[str, Any],
+    include_tokens: tuple[str, ...],
+    exclude_tokens: tuple[str, ...] = (),
+) -> Any:
+    for key, value in data.items():
+        if value in (None, ""):
+            continue
+        normalized_key = _normalize_data_key(str(key))
+        if any(token in normalized_key for token in include_tokens) and not any(
+            token in normalized_key for token in exclude_tokens
+        ):
+            return value
     return None
 
 
@@ -1145,8 +1224,46 @@ def _first_interesting_data_string(data: dict[str, Any]) -> str:
 
 
 def _title_case_label(value: str) -> str:
-    spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", value.replace("_", " ").replace("-", " "))
+    cleaned = " ".join(value.replace("_", " ").replace("-", " ").split())
+    if re.search(r"[\s()/]", value):
+        return cleaned
+    spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", cleaned)
     return " ".join(word.capitalize() for word in spaced.split())
+
+
+def _is_internal_data_key(key: str) -> bool:
+    return _normalize_data_key(key) in {
+        "id",
+        "title",
+        "url",
+        "source",
+        "sourcetype",
+        "sourceurl",
+        "sourceurldisplay",
+        "source_label",
+        "sourcelabel",
+        "status",
+        "statuslabel",
+        "kind",
+        "kindlabel",
+        "group",
+        "summary",
+        "description",
+        "onesentencesummary",
+        "excerpt",
+        "aireason",
+        "airank",
+        "rank",
+        "score",
+        "combinedscore",
+        "constraintviolated",
+        "constraintreason",
+        "rawdata",
+        "attributes",
+        "chips",
+        "metrics",
+        "locationlabel",
+    }
 
 
 def _hostname_label(url: str) -> str:
@@ -1159,153 +1276,74 @@ def _hostname_label(url: str) -> str:
         return "Captured"
 
 
-def _build_backend_metrics(
-    raw_data: dict[str, Any],
-    price_usd: float,
-    distance_miles: float,
-    bedrooms: float,
-    bathrooms: float,
-    square_feet: float,
-    rental_type: str,
-) -> list[dict[str, str]]:
-    ordered_keys = [
-        "Price USD",
-        "Price",
-        "Price Range",
-        "Rent",
-        "Monthly Rent",
-        "Listing Price",
-        "Cost",
-        "External Review Consensus",
-        "Common Complaints",
-        "Review Summary",
-        "Reddit Consensus",
-        "Owner Feedback",
-        "Cooling Performance",
-        "Cooling Performance Rating",
-        "Fan Speed (RPM)",
-        "Max Fan Speed (RPM)",
-        "Noise Level (dB)",
-        "Number of Fans",
-        "Fan Configuration",
-        "Fan Type & Count",
-        "Cooling Mechanism",
-        "Cooling Method",
-        "Laptop Size Compatibility",
-        "Compatible Laptop Sizes",
-        "USB Hub/Ports",
-        "USB Hub Ports",
-        "RGB Lighting",
-        "Dust Filtration",
-        "Dust Protection",
-        "Distance to Anchor",
-        "Neighborhood",
-        "Rental Type",
-        "Bedrooms",
-        "Bathrooms",
-        "Square Feet",
-    ]
-
+def _build_backend_metrics(raw_data: dict[str, Any]) -> list[dict[str, str]]:
     metrics: list[dict[str, str]] = []
-    for key in ordered_keys:
-        value = _lookup_data_value(raw_data, [key])
-        text = _stringify_data_value(value)
-        if not text:
+    seen_labels: set[str] = set()
+    for key, value in raw_data.items():
+        if _is_internal_data_key(key):
             continue
-        metrics.append({"label": _title_case_label(key), "value": text})
+        text = _stringify_data_value(value)
+        if not text or text == "Unknown":
+            continue
+        label = _title_case_label(key)
+        normalized_label = _normalize_data_key(label)
+        if normalized_label in seen_labels:
+            continue
+        seen_labels.add(normalized_label)
+        metrics.append({"label": label, "value": text})
         if len(metrics) >= 6:
-            return metrics
-
-    if not metrics:
-        generic_metrics = [
-            {"label": _title_case_label(key), "value": _stringify_data_value(value)}
-            for key, value in raw_data.items()
-            if _stringify_data_value(value)
-            and _normalize_data_key(key)
-            not in {
-                "title", "url", "sourceurl", "sourcetype", "airank", "aireason", "constraintviolated", "constraintreason",
-            }
-        ]
-        if generic_metrics:
-            return generic_metrics[:6]
-
-        metrics = [
-            {"label": "Price", "value": f"${price_usd:g}" if price_usd else "$0"},
-            {"label": "Signal", "value": f"{distance_miles:g}" if distance_miles else "0"},
-            {"label": "Type", "value": rental_type or "Unknown"},
-            {"label": "Shape", "value": f"{bedrooms:g}/{bathrooms:g}/{square_feet:g}"},
-        ]
-
-    return metrics[:6]
+            return _prioritize_review_metrics(metrics, 6)
+    return _prioritize_review_metrics(metrics, 6)
 
 
 def _build_backend_chips(raw_data: dict[str, Any], metrics: list[dict[str, str]], source_type: str) -> list[str]:
-    preferred_keys = [
-        "Cooling Mechanism",
-        "Cooling Method",
-        "Build Material",
-        "Power Source",
-        "Neighborhood",
-        "Lease Term",
-        "RGB Lighting",
-        "Dust Filtration",
-        "Dust Protection",
-        "Noise Control Features",
-        "External Review Consensus",
-        "Common Complaints",
-        "Reddit Consensus",
-    ]
     chips: list[str] = []
-    for key in preferred_keys:
-        value = _stringify_data_value(_lookup_data_value(raw_data, [key]))
-        if value:
-            chips.append(f"{_title_case_label(key)} {value}")
-        if len(chips) >= 4:
-            return chips
+    seen: set[str] = set()
+
+    def add_chip(value: str) -> None:
+        normalized = " ".join(value.split()).strip(" .,-")
+        if not normalized:
+            return
+        lowered = normalized.lower()
+        if lowered in {"captured", "ai found", "unknown"} or lowered in seen:
+            return
+        seen.add(lowered)
+        chips.append(normalized)
+
+    llm_chips = raw_data.get("chips")
+    if isinstance(llm_chips, list):
+        for chip in llm_chips:
+            if isinstance(chip, str):
+                add_chip(chip)
+            if len(chips) >= 4:
+                return chips
 
     for metric in metrics:
-        chips.append(f"{metric['label']} {metric['value']}")
+        if not isinstance(metric, dict):
+            continue
+        label = _stringify_data_value(metric.get("label"))
+        value = _stringify_data_value(metric.get("value"))
+        if not label or not value or value == "Unknown":
+            continue
+        add_chip(f"{label}: {value}")
         if len(chips) >= 4:
             return chips
 
-    chips.append("AI found" if source_type == "discovered" else "Captured")
+    summary = _stringify_data_value(raw_data.get("summary"))
+    ai_reason = _stringify_data_value(raw_data.get("aiReason"))
+    for text in [summary, ai_reason]:
+        if not text:
+            continue
+        for piece in re.split(r"[.;|]", text):
+            cleaned = " ".join(piece.split())
+            if len(cleaned) < 12:
+                continue
+            add_chip(cleaned[:72].rstrip(" ,"))
+            if len(chips) >= 4:
+                return chips
+
+    add_chip("AI discovered" if source_type == "discovered" else "Captured")
     return chips[:4]
-
-
-def _derive_noise_display(raw_data: dict[str, Any], summary: str, ai_reason: str) -> str:
-    explicit = _stringify_data_value(
-        _lookup_data_value(raw_data, ["noiseLevelDb", "Noise Level (dB)", "Noise Level", "Noise"])
-    )
-    if explicit:
-        return explicit
-
-    combined = f"{summary} {ai_reason} {' '.join(str(value) for value in raw_data.values())}".lower()
-    if "quiet" in combined:
-        return "Quiet"
-    if "loud" in combined or "noisy" in combined:
-        return "Loud"
-    if "improved noise" in combined or "noise profile" in combined:
-        return "Moderate"
-    return "Unknown"
-
-
-def _derive_cooling_performance(raw_data: dict[str, Any], fan_speed_rpm: float, ai_reason: str) -> tuple[str, float]:
-    explicit = _stringify_data_value(
-        _lookup_data_value(raw_data, ["coolingPerformance", "Cooling Performance", "Cooling Performance Rating"])
-    )
-    if explicit:
-        return explicit, _parse_range_midpoint(explicit, fan_speed_rpm)
-
-    combined = f"{ai_reason} {' '.join(str(value) for value in raw_data.values())}".lower()
-    if fan_speed_rpm >= 4200 or "maximum thermal" in combined or "industrial-grade" in combined:
-        return "Very high", max(fan_speed_rpm, 95)
-    if fan_speed_rpm >= 2600 or "premium performance" in combined or "stronger cooling" in combined:
-        return "High", max(fan_speed_rpm, 82)
-    if fan_speed_rpm >= 1400 or "balanced cooling" in combined:
-        return "Moderate", max(fan_speed_rpm, 68)
-    if fan_speed_rpm > 0:
-        return "Basic", fan_speed_rpm
-    return "Unknown", 0
 
 
 def _graph_debug_payload(graph: ReactFlowGraphData) -> list[dict[str, Any]]:
@@ -1397,26 +1435,20 @@ def _canonicalize_graph_for_frontend(graph: ReactFlowGraphData) -> ReactFlowGrap
     payload = graph.model_dump()
     for index, node in enumerate(payload.get("nodes", [])):
         raw_data = dict(node.get("data") or {})
-        brand = _stringify_data_value(_lookup_data_value(raw_data, ["Brand", "brand"]))
-        model = _stringify_data_value(_lookup_data_value(raw_data, ["Model", "model"]))
         title = (
-            _stringify_data_value(_lookup_data_value(raw_data, ["title", "Title", "name", "Name", "Product Name", "productName"]))
-            or " ".join(bit for bit in [brand, model] if bit).strip()
+            _stringify_data_value(_lookup_data_value(raw_data, ["title", "Title", "name", "Name"]))
             or _first_interesting_data_string(raw_data)
             or f"Item {index + 1}"
         )
         url = _stringify_data_value(_lookup_data_value(raw_data, ["url", "URL", "Source URL", "sourceUrl", "source_url"]))
         source_type = _stringify_data_value(_lookup_data_value(raw_data, ["sourceType", "Source Type", "source_type"]), "seed").lower()
         source_type = "discovered" if source_type == "discovered" else "seed"
-        source_label = _hostname_label(url) if url else _stringify_data_value(_lookup_data_value(raw_data, ["Source", "source", "Brand"]), "Captured")
-        location_label = _stringify_data_value(_lookup_data_value(raw_data, ["locationLabel", "Neighborhood", "Location", "Brand", "Platform"]), "Unknown")
-        kind_label = _stringify_data_value(_lookup_data_value(raw_data, ["kind", "Type", "Rental Type", "Cooling Method", "Cooling Mechanism", "Product Type"]), "Item")
-        price_usd = _parse_price_value(_lookup_data_value(raw_data, ["priceUsd", "Price USD", "Price", "Price Range", "Rent", "Monthly Rent", "Listing Price"]))
-        distance_miles = _parse_data_number(_lookup_data_value(raw_data, ["distanceMiles", "Distance to Anchor", "Noise Level", "Noise Level (dB)"]))
-        bedrooms = _parse_data_number(_lookup_data_value(raw_data, ["bedrooms", "Bedrooms", "Number of Fans", "Fan Count", "Fan Type/Count", "Fan Type & Count"]))
-        bathrooms = _parse_data_number(_lookup_data_value(raw_data, ["bathrooms", "Bathrooms", "Adjustable Height Levels", "Modes"]))
-        square_feet = _parse_data_number(_lookup_data_value(raw_data, ["squareFeet", "Square Feet", "Fan Speed (RPM)", "Max Fan Speed (RPM)", "Airflow", "Cooling Performance Rating"]))
-        rental_type = _stringify_data_value(_lookup_data_value(raw_data, ["rentalType", "Rental Type", "Cooling Method", "Cooling Mechanism", "Maximum Laptop Size Supported"]), "Unknown")
+        source_label = _hostname_label(url) if url else _stringify_data_value(_lookup_data_value(raw_data, ["Source", "source"]), "Captured")
+        kind_label = _stringify_data_value(_lookup_data_value(raw_data, ["kind", "Kind", "type", "Type", "category", "Category"]), "Item")
+        price_usd = _parse_price_value(
+            _lookup_data_value(raw_data, ["priceUsd"])
+            or _lookup_data_value_by_label_tokens(raw_data, ("price", "cost", "rent"))
+        )
         ai_rank = _parse_data_number(_lookup_data_value(raw_data, ["aiRank", "AI Rank", "rank"]), index + 1)
         combined_score = _parse_data_number(_lookup_data_value(raw_data, ["combinedScore", "Combined Score", "score"]), max(0, 100 - int(ai_rank) * 10))
         ai_reason = _stringify_data_value(_lookup_data_value(raw_data, ["aiReason", "AI Reason", "reason"]))
@@ -1425,17 +1457,12 @@ def _canonicalize_graph_for_frontend(graph: ReactFlowGraphData) -> ReactFlowGrap
             or ai_reason
             or f"{title} is part of the current workspace graph."
         )
-        review_sentiment, review_sentiment_label = _derive_review_sentiment(raw_data, summary, ai_reason)
-        fan_speed_rpm = _parse_data_number(_lookup_data_value(raw_data, ["Fan Speed (RPM)", "Max Fan Speed (RPM)", "fanSpeedRpm", "maxFanSpeedRpm"]))
-        noise_display = _derive_noise_display(raw_data, summary, ai_reason)
-        noise_level_db = _parse_range_midpoint(_lookup_data_value(raw_data, ["noiseLevelDb", "Noise Level (dB)", "Noise Level"]), 0)
-        cooling_performance, cooling_performance_score = _derive_cooling_performance(raw_data, fan_speed_rpm, ai_reason)
         status_label = _stringify_data_value(_lookup_data_value(raw_data, ["status", "Status"])) or ("enriched" if source_type == "discovered" else "captured")
         attributes_list = raw_data.get("attributes")
         if isinstance(attributes_list, list) and len(attributes_list) > 0:
-            metrics = attributes_list[:6]
+            metrics = _prioritize_review_metrics(attributes_list, 6)
         else:
-            metrics = _build_backend_metrics(raw_data, price_usd, distance_miles, bedrooms, bathrooms, square_feet, rental_type)
+            metrics = _build_backend_metrics(raw_data)
         chips = _build_backend_chips(raw_data, metrics, source_type)
         raw_copy = dict(raw_data)
 
@@ -1447,23 +1474,10 @@ def _canonicalize_graph_for_frontend(graph: ReactFlowGraphData) -> ReactFlowGrap
             "statusLabel": status_label,
             "kindLabel": kind_label,
             "summary": summary,
-            "locationLabel": location_label,
             "priceUsd": price_usd,
-            "distanceMiles": distance_miles,
-            "fanSpeedRpm": fan_speed_rpm,
-            "noiseLevelDb": noise_level_db,
-            "noiseDisplay": noise_display,
-            "coolingPerformance": cooling_performance,
-            "coolingPerformanceScore": cooling_performance_score,
-            "bedrooms": bedrooms,
-            "bathrooms": bathrooms,
-            "squareFeet": square_feet,
-            "rentalType": rental_type,
             "combinedScore": combined_score,
             "aiRank": ai_rank,
             "aiReason": ai_reason,
-            "reviewSentiment": review_sentiment,
-            "reviewSentimentLabel": review_sentiment_label,
             "sourceType": source_type,
             "constraintViolated": bool(_lookup_data_value(raw_data, ["constraintViolated", "Constraint Violated"])),
             "constraintReason": _stringify_data_value(_lookup_data_value(raw_data, ["constraintReason", "Constraint Reason"])),
@@ -1475,6 +1489,134 @@ def _canonicalize_graph_for_frontend(graph: ReactFlowGraphData) -> ReactFlowGrap
     return ReactFlowGraphData.model_validate(payload)
 
 
+def _normalized_url_key(value: str) -> str:
+    raw = _stringify_data_value(value)
+    if not raw:
+        return ""
+    try:
+        parsed = urlsplit(raw)
+    except Exception:
+        return raw.strip().lower().rstrip("/")
+
+    hostname = (parsed.hostname or "").lower()
+    if hostname.startswith("www."):
+        hostname = hostname[4:]
+    path = (parsed.path or "").rstrip("/")
+    amazon_match = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})(?:[/?]|$)", path, flags=re.IGNORECASE)
+    if "amazon." in hostname and amazon_match:
+        return f"amazon:{amazon_match.group(1).lower()}"
+    if "/ref=" in path:
+        path = path.split("/ref=", 1)[0]
+    return f"{hostname}{path}".lower()
+
+
+def _reconcile_seed_nodes(graph: ReactFlowGraphData, active_tabs: list[ActiveTab]) -> ReactFlowGraphData:
+    seed_url_keys = {
+        _normalized_url_key(str(tab.url))
+        for tab in active_tabs
+        if _normalized_url_key(str(tab.url))
+    }
+    if not seed_url_keys:
+        return graph
+
+    payload = graph.model_dump()
+    for node in payload.get("nodes", []):
+        data = dict(node.get("data") or {})
+        node_url = _stringify_data_value(data.get("url"))
+        if _normalized_url_key(node_url) not in seed_url_keys:
+            continue
+
+        data["sourceType"] = "seed"
+        status_label = _stringify_data_value(data.get("statusLabel"))
+        if not status_label or status_label == "enriched":
+            data["statusLabel"] = "captured"
+        node["data"] = data
+
+    return ReactFlowGraphData.model_validate(payload)
+
+
+def _seed_node_id_for_tab(tab: ActiveTab, index: int) -> str:
+    normalized = _normalized_url_key(str(tab.url))
+    base = re.sub(r"[^a-z0-9]+", "-", normalized.lower()).strip("-")
+    if not base:
+        base = f"tab-{index + 1}"
+    return f"seed-{base[:80]}"
+
+
+def _ensure_seed_nodes_present(graph: ReactFlowGraphData, active_tabs: list[ActiveTab]) -> ReactFlowGraphData:
+    payload = graph.model_dump()
+    nodes = list(payload.get("nodes", []))
+    existing_url_keys = {
+        _normalized_url_key(_stringify_data_value((node.get("data") or {}).get("url")))
+        for node in nodes
+    }
+    existing_url_keys.discard("")
+    existing_ids = {str(node.get("id", "")) for node in nodes}
+    next_rank = max(
+        (
+            int(_parse_data_number((node.get("data") or {}).get("aiRank"), 0))
+            for node in nodes
+        ),
+        default=0,
+    ) + 1
+
+    for index, tab in enumerate(active_tabs):
+        url = str(tab.url)
+        url_key = _normalized_url_key(url)
+        if not url_key or url_key in existing_url_keys:
+            continue
+
+        node_id = _seed_node_id_for_tab(tab, index)
+        suffix = 2
+        while node_id in existing_ids:
+            node_id = f"{_seed_node_id_for_tab(tab, index)}-{suffix}"
+            suffix += 1
+
+        title = _title_from_active_tab_summary(tab)
+        summary = tab.summary.strip() or f"Captured tab for {title}"
+        nodes.append(
+            {
+                "id": node_id,
+                "type": "research",
+                "data": {
+                    "title": title,
+                    "url": url,
+                    "sourceType": "seed",
+                    "aiRank": float(next_rank),
+                    "aiReason": "Captured tab preserved from the user's workspace.",
+                    "summary": summary,
+                    "constraintViolated": False,
+                    "constraintReason": "",
+                },
+                "position": {"x": float(len(nodes) * 320), "y": 0.0},
+            }
+        )
+        existing_ids.add(node_id)
+        existing_url_keys.add(url_key)
+        next_rank += 1
+
+    payload["nodes"] = nodes
+    return ReactFlowGraphData.model_validate(payload)
+
+
+def _drop_discovered_nodes(graph: ReactFlowGraphData) -> ReactFlowGraphData:
+    payload = graph.model_dump()
+    kept_nodes = [
+        node
+        for node in payload.get("nodes", [])
+        if _stringify_data_value((node.get("data") or {}).get("sourceType"), "seed").lower() != "discovered"
+    ]
+    kept_ids = {node.get("id") for node in kept_nodes}
+    kept_edges = [
+        edge
+        for edge in payload.get("edges", [])
+        if edge.get("source") in kept_ids and edge.get("target") in kept_ids
+    ]
+    payload["nodes"] = kept_nodes
+    payload["edges"] = kept_edges
+    return ReactFlowGraphData.model_validate(payload)
+
+
 
 
 
@@ -1482,12 +1624,24 @@ def _extract_price_constraint(user_constraint: str | None) -> tuple[str, float] 
     if not user_constraint:
         return None
     text = user_constraint.lower()
-    match = re.search(r"(under|below|less than|<=?)\s*\$?\s*(\d+(?:\.\d+)?)", text)
-    if match:
-        return ("max", float(match.group(2)))
-    match = re.search(r"(over|above|more than|>=?)\s*\$?\s*(\d+(?:\.\d+)?)", text)
-    if match:
-        return ("min", float(match.group(2)))
+    max_patterns = [
+        r"(under|below|less than(?:\s+or\s+equal\s+to)?|at most|up to|no more than|maximum|max|<=?)\s*\$?\s*(\d+(?:\.\d+)?)",
+        r"\$?\s*(\d+(?:\.\d+)?)\s*(?:usd|dollars?)?\s*(?:or less|or below|or under)",
+    ]
+    for pattern in max_patterns:
+        match = re.search(pattern, text)
+        if match:
+            return ("max", float(match.group(match.lastindex or 1)))
+
+    min_patterns = [
+        r"(over|above|more than(?:\s+or\s+equal\s+to)?|at least|no less than|minimum|min|>=?)\s*\$?\s*(\d+(?:\.\d+)?)",
+        r"\$?\s*(\d+(?:\.\d+)?)\s*(?:usd|dollars?)?\s*(?:or more|or above|or over)",
+    ]
+    for pattern in min_patterns:
+        match = re.search(pattern, text)
+        if match:
+            return ("min", float(match.group(match.lastindex or 1)))
+
     return None
 
 
@@ -1559,73 +1713,67 @@ def _session_type_for_node(node: ReactFlowNode) -> str:
 
 
 def _session_subtitle_for_node(data: dict[str, Any]) -> str:
-    source_label = _stringify_data_value(data.get("sourceLabel")).lower()
-    title = _stringify_data_value(data.get("title")).lower()
-    if any(token in source_label for token in ["reddit", "forum"]) or any(token in title for token in ["consensus", "review", "feedback"]):
-        review_sentiment = _stringify_data_value(data.get("reviewSentimentLabel"))
-        summary = _stringify_data_value(data.get("summary"))
-        if review_sentiment and review_sentiment != "Unknown":
-            return review_sentiment
-        if summary:
-            return _debug_truncate(summary, 96)
-        return _stringify_data_value(data.get("sourceLabel"), "External review")
+    metrics = data.get("metrics")
+    if isinstance(metrics, list):
+        metric_bits: list[str] = []
+        for metric in metrics[:2]:
+            if not isinstance(metric, dict):
+                continue
+            label = _stringify_data_value(metric.get("label"))
+            value = _stringify_data_value(metric.get("value"))
+            if not value or value == "Unknown":
+                continue
+            metric_bits.append(f"{label}: {value}" if label else value)
+        if metric_bits:
+            return " | ".join(metric_bits[:2])
 
-    metric_bits: list[str] = []
     price_usd = _parse_data_number(data.get("priceUsd"))
     if price_usd > 0:
-        metric_bits.append(f"${price_usd:,.0f}")
+        return f"${price_usd:,.0f}"
 
-    noise_display = _stringify_data_value(data.get("noiseDisplay"))
-    cooling_performance = _stringify_data_value(data.get("coolingPerformance"))
-    fan_speed_rpm = _parse_data_number(data.get("fanSpeedRpm"))
-    if fan_speed_rpm > 0:
-        metric_bits.append(f"{fan_speed_rpm:g} RPM")
-    if noise_display and noise_display != "Unknown":
-        metric_bits.append(f"Noise {noise_display}")
-    if cooling_performance and cooling_performance != "Unknown":
-        metric_bits.append(f"Cooling {cooling_performance}")
+    summary = _stringify_data_value(data.get("summary"))
+    if summary:
+        return _debug_truncate(summary, 96)
 
-    distance_miles = _parse_data_number(data.get("distanceMiles"))
-    if distance_miles > 0:
-        metric_bits.append(f"{distance_miles:g} mi")
-
-    rental_type = _stringify_data_value(data.get("rentalType"))
-    if rental_type and rental_type != "Unknown":
-        metric_bits.insert(0, rental_type)
-
-    metrics = data.get("metrics")
-    if not metric_bits and isinstance(metrics, list):
-        metric_bits = [
-            _stringify_data_value(metric.get("value"))
-            for metric in metrics[:2]
-            if isinstance(metric, dict) and _stringify_data_value(metric.get("value"))
-        ]
-
-    return " · ".join(metric_bits[:3]) or _stringify_data_value(data.get("sourceLabel"), "Captured")
+    return _stringify_data_value(data.get("sourceLabel"), "Captured")
 
 
 def _session_metadata_for_node(data: dict[str, Any]) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
-    for key in [
-        "priceUsd",
-        "distanceMiles",
-        "bedrooms",
-        "bathrooms",
-        "squareFeet",
-        "combinedScore",
-        "aiRank",
-        "fanSpeedRpm",
-        "noiseLevelDb",
-        "coolingPerformanceScore",
-    ]:
+    review_label = _review_field_label()
+    review_consensus_present = bool(
+        _review_field_value_from_mapping(data)
+        or _review_field_value_from_mapping(data.get("rawData") if isinstance(data.get("rawData"), dict) else {})
+    )
+    for key in ["priceUsd", "combinedScore", "aiRank"]:
         value = data.get(key)
         if isinstance(value, (int, float)) and value not in (0, 0.0):
             metadata[key] = value
 
-    for key in ["rentalType", "locationLabel", "sourceType", "statusLabel", "kindLabel", "noiseDisplay", "coolingPerformance", "reviewSentiment", "reviewSentimentLabel"]:
+    for key in ["sourceType", "statusLabel", "kindLabel"]:
         value = _stringify_data_value(data.get(key))
         if value and value != "Unknown":
             metadata[key] = value
+
+    metrics = data.get("metrics")
+    if isinstance(metrics, list):
+        sanitized_metrics = [
+            {
+                "label": _stringify_data_value(metric.get("label")),
+                "value": _stringify_data_value(metric.get("value")),
+            }
+            for metric in metrics
+            if isinstance(metric, dict)
+            and _stringify_data_value(metric.get("value"))
+            and _stringify_data_value(metric.get("value")) != "Unknown"
+            and not (
+                review_consensus_present
+                and _normalize_data_key(_stringify_data_value(metric.get("label"))) == _normalize_data_key("Review Sentiment")
+            )
+        ]
+        if sanitized_metrics:
+            metadata["metrics"] = sanitized_metrics[:6]
+
     metadata["constraintViolated"] = bool(data.get("constraintViolated"))
     constraint_reason = _stringify_data_value(data.get("constraintReason"))
     if constraint_reason:
@@ -1633,19 +1781,29 @@ def _session_metadata_for_node(data: dict[str, Any]) -> dict[str, Any]:
 
     raw_data = data.get("rawData")
     if isinstance(raw_data, dict):
-        for raw_key in [
-            "Brand",
-            "Model",
-            "Laptop Size Compatibility",
-            "Compatible Laptop Sizes",
-            "Cooling Mechanism",
-            "Noise Level (dB)",
-            "Price Range",
-            "USB Hub/Connectivity",
-        ]:
-            raw_value = _stringify_data_value(raw_data.get(raw_key))
-            if raw_value:
-                metadata[_normalize_data_key(raw_key)] = raw_value
+        existing_keys = {_normalize_data_key(key) for key in metadata}
+        for raw_key, raw_value in raw_data.items():
+            if _is_internal_data_key(raw_key):
+                continue
+            normalized_key = _normalize_data_key(raw_key)
+            if review_consensus_present and normalized_key == _normalize_data_key("Review Sentiment"):
+                continue
+            if normalized_key in existing_keys:
+                continue
+            if isinstance(raw_value, (int, float)) and raw_value not in (0, 0.0):
+                metadata[str(raw_key)] = raw_value
+                existing_keys.add(normalized_key)
+                continue
+            text = _stringify_data_value(raw_value)
+            if not text or text == "Unknown":
+                continue
+            metadata[str(raw_key)] = text
+            existing_keys.add(normalized_key)
+
+    review_value = _review_field_value_from_mapping(data) or _review_field_value_from_mapping(
+        data.get("rawData") if isinstance(data.get("rawData"), dict) else {}
+    )
+    metadata[review_label] = review_value or "Unknown"
 
     return metadata
 
@@ -1662,6 +1820,7 @@ def _build_session_graph(graph: ReactFlowGraphData) -> SessionGraph:
             SessionGraphNode(
                 id=node.id,
                 type=_session_type_for_node(node),
+                url=_stringify_data_value(data.get("url")),
                 source=_stringify_data_value(data.get("sourceLabel"), "Captured"),
                 title=_stringify_data_value(data.get("title"), node.id),
                 subtitle=_session_subtitle_for_node(data),
@@ -1816,6 +1975,7 @@ def _graph_to_unified_session(graph: ReactFlowGraphData, query: str, user_constr
     return UnifiedSession(
         session_id=f"ses_{int(time.time())}",
         query=query,
+        user_constraint=(user_constraint or "").strip(),
         domain=domain,
         status=overall_status,
         rubric_fields=list(graph.rubric_fields),
@@ -1827,6 +1987,7 @@ def _graph_to_unified_session(graph: ReactFlowGraphData, query: str, user_constr
 
 def _apply_constraint_to_session(session: UnifiedSession, user_constraint: str | None = None) -> UnifiedSession:
     next_session = session.model_copy(deep=True)
+    normalized_constraint = (user_constraint or "").strip()
     ready = flagged = 0
 
     for node in next_session.graph.nodes:
@@ -1880,9 +2041,10 @@ def _apply_constraint_to_session(session: UnifiedSession, user_constraint: str |
         pending=flagged,
     )
     theme_signals = [signal for signal in next_session.digest.theme_signals if not signal.startswith("constraint:")]
-    if user_constraint:
-        theme_signals.append(f"constraint: {user_constraint.strip()}")
+    if normalized_constraint:
+        theme_signals.append(f"constraint: {normalized_constraint}")
     next_session.digest.theme_signals = theme_signals
+    next_session.user_constraint = normalized_constraint
     next_session.status = "pending" if flagged else "ready"
     return next_session
 
@@ -1947,42 +2109,7 @@ def _review_search_queries(active_tabs: list[ActiveTab], user_prompt: str, budge
 
 
 def _filter_graph_for_prompt(graph: ReactFlowGraphData, user_prompt: str) -> ReactFlowGraphData:
-    prompt = user_prompt.lower()
-    wants_active_cooler = any(token in prompt for token in ["cooler", "cooling pad", "cooling pads", "laptop cooler"])
-    if not wants_active_cooler:
-        return graph
-
-    kept_nodes: list[ReactFlowNode] = []
-    for node in graph.nodes:
-        data = dict(node.data)
-        blob = " ".join(str(value) for value in data.values()).lower()
-        source_type = str(data.get("sourceType", "")).lower()
-        node_id = str(node.id).lower()
-        title = str(data.get("title", "")).lower()
-        url = str(data.get("url", "")).lower()
-        mentions_passive = "passive" in blob or "stand" in blob
-        missing_active_signals = all(token not in blob for token in ["fan", "rpm", "cfm", "turbo"])
-        looks_like_placeholder = (
-            re.fullmatch(r"item \d+", str(data.get("title", "")).strip(), re.IGNORECASE) is not None
-            or "concept" in node_id
-            or "concept" in title
-            or "technology" in title
-            or "explainer" in title
-        )
-        has_product_signal = any(
-            token in blob for token in ["price", "$", "rpm", "fan", "noise", "usb", "inch", "cooling"]
-        )
-        if source_type == "discovered" and mentions_passive and missing_active_signals:
-            continue
-        if source_type == "discovered" and looks_like_placeholder and not has_product_signal:
-            continue
-        if source_type == "discovered" and not url:
-            continue
-        kept_nodes.append(node)
-
-    kept_ids = {node.id for node in kept_nodes}
-    kept_edges = [edge for edge in graph.edges if edge.source in kept_ids and edge.target in kept_ids]
-    return ReactFlowGraphData(nodes=kept_nodes, edges=kept_edges)
+    return graph
 
 
 @app.get("/health")
@@ -1996,6 +2123,9 @@ async def extension_snapshot(payload: ExtensionSnapshot) -> dict[str, str]:
         "url": str(payload.url),
         "title": payload.title,
         "dom": payload.dom,
+        "readable_text": payload.readable_text,
+        "readable_html": payload.readable_html,
+        "readable_extractor": payload.readable_extractor,
         "timestamp": timestamp,
     }
     _prune_extension_history(timestamp)
@@ -2006,6 +2136,8 @@ async def extension_snapshot(payload: ExtensionSnapshot) -> dict[str, str]:
                 "url": str(payload.url),
                 "title": _debug_truncate(payload.title, 80),
                 "dom_chars": len(payload.dom),
+                "readable_text_chars": len(payload.readable_text),
+                "readable_extractor": payload.readable_extractor,
                 "timestamp": timestamp,
             }
         ),
@@ -2015,13 +2147,14 @@ async def extension_snapshot(payload: ExtensionSnapshot) -> dict[str, str]:
 
 
 @app.get("/api/v1/extension/preferences")
-async def extension_preferences_view() -> dict[str, str]:
+async def extension_preferences_view() -> dict[str, Any]:
     return extension_preferences
 
 
 @app.post("/api/v1/extension/preferences")
-async def extension_preferences_update(payload: ExtensionPreferencesRequest) -> dict[str, str]:
+async def extension_preferences_update(payload: ExtensionPreferencesRequest) -> dict[str, Any]:
     extension_preferences["user_prompt"] = payload.user_prompt.strip()
+    extension_preferences["enable_discovery"] = bool(payload.enable_discovery)
     return extension_preferences
 
 
@@ -2039,6 +2172,7 @@ async def extension_history_stats() -> dict[str, Any]:
     return {
         "count": len(tabs),
         "user_prompt": extension_preferences.get("user_prompt", ""),
+        "enable_discovery": bool(extension_preferences.get("enable_discovery", DISCOVERY_ENABLED_BY_DEFAULT)),
         "recent": [
             {
                 "url": entry.get("url", ""),
@@ -2053,27 +2187,34 @@ async def extension_history_stats() -> dict[str, Any]:
 @app.post("/api/v1/synthesize", response_model=ReactFlowGraphData)
 async def synthesize(payload: SynthesizeRequest) -> ReactFlowGraphData:
     try:
+        effective_discovery = (
+            bool(payload.enable_discovery)
+            if payload.enable_discovery is not None
+            else _should_investigate_further(payload.user_prompt)
+        )
+        effective_query_budget = payload.firecrawl_query_budget if effective_discovery else 0
         logger.debug(
-            "Synthesize start prompt=%r constraint=%r active_tabs=%s budget=%s",
+            "Synthesize start prompt=%r constraint=%r active_tabs=%s budget=%s discovery=%s",
             _debug_truncate(payload.user_prompt, 160),
             _debug_truncate(payload.user_constraint, 120) if payload.user_constraint else "",
             len(payload.active_tabs),
-            payload.firecrawl_query_budget,
+            effective_query_budget,
+            effective_discovery,
         )
         logger.debug(
             "Synthesize active tab previews=%s",
             _debug_json([_tab_debug_payload(tab) for tab in payload.active_tabs]),
         )
         context = _tabs_to_context(payload.active_tabs)
-        query_budget_remaining = payload.firecrawl_query_budget
-        allow_discovery = _should_investigate_further(payload.user_prompt) and query_budget_remaining > 0
+        query_budget_remaining = effective_query_budget
+        allow_discovery = effective_discovery and query_budget_remaining > 0
 
         rubric = await _build_rubric(payload, context)
         logger.debug("Generated rubric fields=%s", rubric.fields)
         logger.debug("Inferred constraints=%s seed_patterns=%s", rubric.inferred_constraints, rubric.seed_patterns)
 
         review_queries = _review_search_queries(payload.active_tabs, payload.user_prompt, query_budget_remaining)
-        if review_queries:
+        if allow_discovery and review_queries:
             logger.debug("Running review-focused discovery queries=%s", review_queries)
             review_results = await asyncio.gather(
                 *[_run_firecrawl_search(query) for query in review_queries],
@@ -2155,7 +2296,11 @@ async def synthesize(payload: SynthesizeRequest) -> ReactFlowGraphData:
                 len(raw_graph.nodes),
                 len(filtered_graph.nodes),
             )
+        filtered_graph = _ensure_seed_nodes_present(filtered_graph, payload.active_tabs)
         graph = _canonicalize_graph_for_frontend(filtered_graph)
+        graph = _reconcile_seed_nodes(graph, payload.active_tabs)
+        if not effective_discovery:
+            graph = _drop_discovered_nodes(graph)
         graph.domain = rubric.domain
         graph.rubric_fields = rubric.fields
         logger.debug("Canonical graph snapshot=%s", _debug_json(_graph_debug_payload(graph)))
@@ -2163,7 +2308,11 @@ async def synthesize(payload: SynthesizeRequest) -> ReactFlowGraphData:
             node.id
             for node in graph.nodes
             if re.fullmatch(r"Item \d+", node.data.title or "")
-            or (not node.data.url and node.data.priceUsd == 0 and node.data.rentalType == "Unknown")
+            or (
+                not node.data.url
+                and not _stringify_data_value(getattr(node.data, "summary", ""))
+                and not isinstance(getattr(node.data, "metrics", None), list)
+            )
         ]
         if placeholder_like_nodes:
             logger.warning(
@@ -2197,6 +2346,7 @@ async def synthesize_from_dom(payload: SynthesizeFromDomRequest) -> ReactFlowGra
             user_constraint=payload.user_constraint,
             active_tabs=active_tabs,
             firecrawl_query_budget=payload.firecrawl_query_budget,
+            enable_discovery=payload.enable_discovery,
             previous_graph=payload.previous_graph,
         )
         return await synthesize(synthesize_payload)
@@ -2246,12 +2396,16 @@ async def synthesize_from_extension_history(payload: SynthesizeFromExtensionRequ
             user_prompt=payload.user_prompt,
             user_constraint=payload.user_constraint,
             firecrawl_query_budget=payload.firecrawl_query_budget,
+            enable_discovery=payload.enable_discovery,
             previous_graph=payload.previous_graph,
             tabs=[
                 DomTab(
                     url=entry["url"],
                     title=str(entry.get("title", "")),
                     dom=str(entry.get("dom", "")),
+                    readable_text=str(entry.get("readable_text", "")),
+                    readable_html=str(entry.get("readable_html", "")),
+                    readable_extractor=str(entry.get("readable_extractor", "")),
                 )
                 for entry in selected
             ],
