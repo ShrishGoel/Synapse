@@ -15,10 +15,10 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8010";
 const DEFAULT_QUERY = "Compare the laptop coolers";
 const BOARD_WIDTH = 1400;
 const BOARD_MIN_HEIGHT = 780;
-const NODE_WIDTH = 252;
-const NODE_HEIGHT = 212;
-const NODE_GAP = 48;
-const BOARD_PADDING = 56;
+const NODE_WIDTH = 300;
+const NODE_HEIGHT = 440;
+const NODE_GAP = 64;
+const BOARD_PADDING = 80;
 const BOARD_MAX_COLUMNS = 4;
 const SORT_OPTIONS = [
   { value: "ai", label: "AI best choice" },

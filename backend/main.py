@@ -478,8 +478,22 @@ def _entry_relevance_score(entry: dict[str, Any], user_prompt: str) -> int:
     negative_tokens = ["firecrawl", "openrouter", "dashboard", "usage", "billing", "docs", "synapse"]
     if any(token in combined for token in negative_tokens):
         score -= 8
-    if "/s?" in url or "search results" in combined:
-        score -= 4
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        # Penalize homepages
+        if not path or path == "/":
+            score -= 15
+        # Penalize search and category indices
+        elif any(path.startswith(p) for p in ["/s", "/search", "/category", "/c/", "/b/", "/browse", "/departments"]):
+            score -= 10
+        elif "search results" in title:
+            score -= 10
+    except Exception:
+        pass
+
+    prompt = user_prompt.lower()
     if "cooler" in prompt and "stand" in combined and all(token not in combined for token in ["cool", "cooler", "cooling"]):
         score -= 6
 
