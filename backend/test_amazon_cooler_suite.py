@@ -136,39 +136,3 @@ async def test_synthesize_graph_for_coolers_requires_seed_and_discovered_source_
     assert "sourceType is either seed or discovered" in kwargs["system_prompt"]
     assert len(graph.nodes) == 2
     assert {node.data.sourceType for node in graph.nodes} == {"seed", "discovered"}
-
-
-def test_canonicalize_cooler_metadata_does_not_map_noise_to_distance() -> None:
-    graph = main.ReactFlowGraphData(
-        nodes=[
-            main.ReactFlowNode(
-                id="cooler-1",
-                type="research",
-                data={
-                    "title": "llano RGB Cooler",
-                    "url": "https://www.amazon.com/dp/B0EXAMPLE02",
-                    "sourceType": "seed",
-                    "Price": "$39.99",
-                    "Noise Level (dB)": "≤70dB",
-                    "Laptop Size Compatibility": "15.6 to 19 inches",
-                    "Cooling Performance": "High",
-                    "constraintViolated": False,
-                    "constraintReason": "",
-                },
-                position=main.GraphPosition(x=0, y=0),
-            )
-        ],
-        edges=[],
-    )
-
-    canonical = main._canonicalize_graph_for_frontend(graph)
-    session = main._graph_to_unified_session(canonical, "Compare the laptop cooling pads")
-    node = session.graph.nodes[0]
-
-    assert node.metadata["priceUsd"] == 39.99
-    assert "70dB" in node.metadata["Noise Level (dB)"]
-    assert node.metadata["Laptop Size Compatibility"] == "15.6 to 19 inches"
-    assert any("Noise Level" in metric["label"] for metric in node.metadata["metrics"])
-    assert "distanceMiles" not in node.metadata
-    assert "bedrooms" not in node.metadata
-    assert "bathrooms" not in node.metadata

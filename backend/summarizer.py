@@ -20,8 +20,6 @@ DEFAULT_MAX_SEMANTIC_TEXT_CHARS = int(os.getenv("SUMMARIZER_MAX_SEMANTIC_TEXT_CH
 SUMMARY_JSON_SCHEMA = {
     "page_type": "string",
     "title": "string",
-    "primary_subject": "string",
-    "primary_subject_type": "string",
     "one_sentence_summary": "string",
     "key_points": ["string"],
     "entities": [
@@ -155,11 +153,6 @@ def summarize_html(
                     "conversation, URL assumptions, hidden reasoning, or guesses that "
                     "are not grounded in the HTML. Ignore scripts, styles, analytics, "
                     "tracking markup, SVG paths, repeated navigation, and boilerplate. "
-                    "Prefer the page's main subject over related products, recommendation "
-                    "carousels, search results, accessories, sponsored blocks, and "
-                    "'customers also bought' sections. For marketplace or product pages, "
-                    "identify the single primary product that the page is mainly about, "
-                    "using title, h1, semantic metadata, and nearby product facts first. "
                     "Return only valid JSON. No markdown. No commentary."
                 ),
             },
@@ -173,8 +166,6 @@ def summarize_html(
                     "Rules:\n"
                     "- Use empty arrays when a field is not present in the HTML.\n"
                     "- Use an empty string when a scalar field is not present.\n"
-                    "- 'primary_subject' should be the main item, listing, or topic of this page, not a recommended or related item.\n"
-                    "- 'primary_subject_type' should be a short label such as product, listing, article, forum thread, review page, or comparison page.\n"
                     "- Keep key_points to 3-7 short strings.\n"
                     "- Keep entities and facts grounded in visible or semantic HTML "
                     "text.\n\n"
@@ -220,8 +211,6 @@ def _validate_summary(summary: Any) -> None:
     expected_fields = {
         "page_type": str,
         "title": str,
-        "primary_subject": str,
-        "primary_subject_type": str,
         "one_sentence_summary": str,
         "key_points": list,
         "entities": list,
